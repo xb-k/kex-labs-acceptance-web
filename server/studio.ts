@@ -115,6 +115,8 @@ export interface JobSummary {
   error: string | null
   stage: string | null
   verdict: StudioVerdict
+  /** #139: same real-duration rule as the gallery projection. */
+  duration_ms: number | null
 }
 
 interface JobMeta {
@@ -143,6 +145,13 @@ export interface StudioContext {
   readJson: (file: string) => any
   atomicWriteJson: (file: string, value: unknown) => void
   readBody: (req: IncomingMessage) => Promise<any>
+  /**
+   * Injected by `api.ts` so `DELETE /api/studio/jobs/:id` reuses the exact
+   * `authorizeTaskWrite` guard (token / same-origin contract) of task writes.
+   */
+  authorizeTaskWrite?: (
+    req: IncomingMessage
+  ) => { ok: true } | { ok: false; status: number; error: string }
 }
 
 const BRIEFS_DIR = (ctx: StudioContext) => path.join(ctx.dataRoot, 'studio', 'briefs')
@@ -1182,7 +1191,8 @@ function buildSummary(ctx: StudioContext, item: any): JobSummary {
     updated_at: updatedAt ?? createdAt,
     error: typeof item?.error === 'string' ? item.error : null,
     stage: projection.stage,
-    verdict: projection.verdict
+    verdict: projection.verdict,
+    duration_ms: resolveJobDurationMs(item, createdAt)
   }
 }
 
@@ -1868,6 +1878,377 @@ async function retryJob(ctx: StudioContext, req: IncomingMessage, res: ServerRes
   )
 }
 
+// ---------------------------------------------------------------------------
+// #140 job deletion + image retention
+// ---------------------------------------------------------------------------
+
+const AUDIT_LOG = (ctx: StudioContext) => path.join(ctx.dataRoot, 'logs', 'audit.log')
+const DEFAULT_IMAGE_RETENTION_DAYS = 7
+const RETENTION_INTERVAL_MS = 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
+
+type AuditEntry = {
+  ts: string
+  ip: string
+  action: 'job_delete' | 'job_retention'
+  id: string | null
+  status: number | string
+  [key: string]: unknown
+}
+
+/** Best-effort JSONL audit; a read-only data root must never break an action. */
+function appendAudit(ctx: StudioContext, entry: AuditEntry): void {
+  try {
+    const file = AUDIT_LOG(ctx)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, 'utf8')
+  } catch {
+    /* audit is diagnostic, not a gate */
+  }
+}
+
+function requestIp(req: IncomingMessage): string {
+  const forwarded = req.headers['x-forwarded-for']
+  const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded
+  if (typeof raw === 'string' && raw.trim()) return raw.split(',')[0].trim()
+  return req.socket?.remoteAddress ?? 'unknown'
+}
+
+/**
+ * Resolves `p` through symlinks, walking up to the nearest existing ancestor
+ * (macOS temp dirs are symlinked, so a plain resolve is not enough).
+ */
+function realOrNearest(p: string): string | null {
+  let current = path.resolve(p)
+  const missing: string[] = []
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...missing.slice().reverse())
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return null
+      missing.push(path.basename(current))
+      current = parent
+    }
+  }
+}
+
+/**
+ * `root/name` when `name` is one plain segment and the resolved target (symlinks
+ * included) stays under `root`; null for `..`, absolute paths and escapes.
+ */
+function safeChild(root: string, name: string): string | null {
+  if (
+    !name ||
+    name !== path.basename(name) ||
+    name.includes('/') ||
+    name.includes('\\') ||
+    name === '.' ||
+    name === '..' ||
+    path.isAbsolute(name)
+  ) {
+    return null
+  }
+  const rootResolved = path.resolve(root)
+  const target = path.resolve(rootResolved, name)
+  if (path.dirname(target) !== rootResolved) return null
+  const rootReal = realOrNearest(rootResolved)
+  const targetReal = realOrNearest(target)
+  if (!rootReal || !targetReal) return null
+  if (targetReal !== rootReal && !targetReal.startsWith(rootReal + path.sep)) return null
+  return target
+}
+
+function removeIfExists(target: string): boolean {
+  try {
+    fs.lstatSync(target)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw err
+  }
+  fs.rmSync(target, { recursive: true, force: true })
+  return true
+}
+
+/**
+ * Deletes only the two web-owned paths of a job:
+ * `<WEB_DATA_ROOT>/jobs/<id>` and `<WEB_DATA_ROOT>/studio/jobs/<id>.json`.
+ * State/reports stay untouched on purpose (audit trail).
+ */
+export function removeJobFiles(
+  ctx: StudioContext,
+  id: string
+): { ok: boolean; deletedDir: boolean; deletedMeta: boolean } {
+  const dir = safeChild(path.join(ctx.dataRoot, 'jobs'), id)
+  const meta = safeChild(path.join(ctx.dataRoot, 'studio', 'jobs'), `${id}.json`)
+  if (!dir || !meta) return { ok: false, deletedDir: false, deletedMeta: false }
+  try {
+    return { ok: true, deletedDir: removeIfExists(dir), deletedMeta: removeIfExists(meta) }
+  } catch {
+    return { ok: false, deletedDir: false, deletedMeta: false }
+  }
+}
+
+function auditDelete(ctx: StudioContext, ip: string, id: string, status: number): void {
+  appendAudit(ctx, { ts: nowIso(), ip, action: 'job_delete', id, status })
+}
+
+/**
+ * `DELETE /api/studio/jobs/:id` (#140).
+ * Only `failed|canceled` jobs may be removed; the intake remains the source of
+ * truth for status, so a missing upstream job is a 404 and a live one a 409.
+ */
+async function deleteJob(
+  ctx: StudioContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string
+): Promise<void> {
+  if (ctx.authorizeTaskWrite) {
+    const auth = ctx.authorizeTaskWrite(req)
+    if (!auth.ok) {
+      ctx.sendJson(res, auth.status, { error: auth.error })
+      return
+    }
+  } else if (!requireWrite(ctx, req, res)) {
+    return
+  }
+
+  const ip = requestIp(req)
+  if (!JOB_NAME_RE.test(id) || path.basename(id) !== id) {
+    auditDelete(ctx, ip, id, 400)
+    ctx.sendJson(res, 400, { error: 'invalid job id' })
+    return
+  }
+
+  const upstream = await callIntake(ctx, 'GET', `/intake/jobs/${encodeURIComponent(id)}`)
+  if (!upstream.ok) {
+    auditDelete(ctx, ip, id, 502)
+    ctx.sendJson(res, 502, upstream.body)
+    return
+  }
+  if (upstream.status >= 400) {
+    auditDelete(ctx, ip, id, 404)
+    ctx.sendJson(res, 404, upstream.body ?? { error: 'job not found' })
+    return
+  }
+
+  const status = studioStatus(upstream.body?.state)
+  if (status !== 'failed' && status !== 'canceled') {
+    auditDelete(ctx, ip, id, 409)
+    ctx.sendJson(res, 409, { error: 'delete requires a failed or canceled job', status })
+    return
+  }
+
+  const removed = removeJobFiles(ctx, id)
+  if (!removed.ok) {
+    auditDelete(ctx, ip, id, 400)
+    ctx.sendJson(res, 400, { error: 'job path rejected' })
+    return
+  }
+  if (!removed.deletedDir && !removed.deletedMeta) {
+    auditDelete(ctx, ip, id, 404)
+    ctx.sendJson(res, 404, { error: 'job not found' })
+    return
+  }
+
+  auditDelete(ctx, ip, id, 200)
+  ctx.sendJson(res, 200, { deleted: true, id })
+}
+
+/** `WEB_IMAGE_RETENTION_DAYS`: default 7, `0` disables the sweep. */
+export function resolveImageRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.WEB_IMAGE_RETENTION_DAYS ?? '').trim()
+  if (!raw) return DEFAULT_IMAGE_RETENTION_DAYS
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_IMAGE_RETENTION_DAYS
+  return Math.floor(value)
+}
+
+export interface RetentionJob {
+  id: string
+  type: string
+  status: JobStatus
+  updated_at: string | null
+}
+
+/** Pure expiry rule: image + failed/canceled + older than `days`. */
+export function selectExpiredImageJobs(
+  jobs: RetentionJob[],
+  days: number,
+  now: number = Date.now()
+): string[] {
+  if (!(days > 0)) return []
+  const cutoff = days * DAY_MS
+  return jobs
+    .filter((job) => {
+      if (job.type !== 'image') return false
+      if (job.status !== 'failed' && job.status !== 'canceled') return false
+      if (typeof job.updated_at !== 'string') return false
+      const updated = Date.parse(job.updated_at)
+      if (!Number.isFinite(updated)) return false
+      return now - updated > cutoff
+    })
+    .map((job) => job.id)
+}
+
+function readImageJobMetas(ctx: StudioContext): JobMeta[] {
+  let names: string[]
+  try {
+    names = fs.readdirSync(JOBS_DIR(ctx))
+  } catch {
+    return []
+  }
+  const metas: JobMeta[] = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const id = name.slice(0, -'.json'.length)
+    if (!JOB_NAME_RE.test(id)) continue
+    const doc = ctx.readJson(path.join(JOBS_DIR(ctx), name))
+    if (!isPlainObject(doc) || doc.id !== id || doc.type !== 'image') continue
+    metas.push(doc as JobMeta)
+  }
+  return metas
+}
+
+export interface RetentionSweepResult {
+  deleted: string[]
+  retained: number
+  skipped?: 'disabled' | 'intake'
+}
+
+/**
+ * Deletes expired image jobs (failed/canceled only). Intake failures never
+ * throw: the sweep reports `skipped: 'intake'` and keeps the directories.
+ */
+export async function sweepExpiredImageJobs(
+  ctx: StudioContext,
+  opts: { now?: number; days?: number } = {}
+): Promise<RetentionSweepResult> {
+  const days = opts.days ?? resolveImageRetentionDays()
+  if (!(days > 0)) return { deleted: [], retained: 0, skipped: 'disabled' }
+
+  const metas = readImageJobMetas(ctx)
+  if (metas.length === 0) return { deleted: [], retained: 0 }
+
+  const upstream = await callIntake(ctx, 'GET', '/intake/jobs?limit=200')
+  if (!upstream.ok || upstream.status >= 400) {
+    appendAudit(ctx, {
+      ts: nowIso(),
+      ip: 'internal',
+      action: 'job_retention',
+      id: null,
+      status: 'intake_unavailable',
+      deleted: 0,
+      retained: metas.length
+    })
+    return { deleted: [], retained: metas.length, skipped: 'intake' }
+  }
+
+  const items = Array.isArray(upstream.body?.items) ? upstream.body.items : []
+  const byId = new Map<string, any>()
+  for (const item of items) {
+    if (isPlainObject(item) && typeof item.id === 'string') byId.set(item.id, item)
+  }
+
+  const jobs: RetentionJob[] = metas.map((meta) => {
+    const item = byId.get(meta.id)
+    return {
+      id: meta.id,
+      type: meta.type,
+      status: studioStatus(item?.state),
+      updated_at: typeof item?.updated_at === 'string' ? item.updated_at : null
+    }
+  })
+
+  const deleted: string[] = []
+  for (const id of selectExpiredImageJobs(jobs, days, opts.now)) {
+    const removed = removeJobFiles(ctx, id)
+    if (!removed.ok || (!removed.deletedDir && !removed.deletedMeta)) continue
+    deleted.push(id)
+    appendAudit(ctx, {
+      ts: nowIso(),
+      ip: 'internal',
+      action: 'job_retention',
+      id,
+      status: 'deleted'
+    })
+  }
+
+  const retained = jobs.length - deleted.length
+  appendAudit(ctx, {
+    ts: nowIso(),
+    ip: 'internal',
+    action: 'job_retention',
+    id: null,
+    status: 200,
+    deleted: deleted.length,
+    retained
+  })
+  return { deleted, retained }
+}
+
+/** Boot + hourly retention sweep; the timer never keeps the process alive. */
+export function startImageRetentionSweep(
+  ctxFactory: () => StudioContext,
+  intervalMs: number = RETENTION_INTERVAL_MS
+): () => void {
+  const run = async (): Promise<void> => {
+    try {
+      const result = await sweepExpiredImageJobs(ctxFactory())
+      if (result.deleted.length > 0) {
+        console.log(
+          `[studio] retention deleted ${result.deleted.length} image job(s), retained ${result.retained}`
+        )
+      }
+    } catch (err) {
+      console.error('[studio] retention sweep failed:', (err as Error).message)
+    }
+  }
+  void run()
+  const timer = setInterval(() => void run(), intervalMs)
+  timer.unref?.()
+  return () => clearInterval(timer)
+}
+
+function numOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function tsOrNull(value: unknown): number | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  const ms = Date.parse(value)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * #139: real generation duration in ms, never estimated.
+ * Priority mirrors the ticket: intake/state duration fields first, then
+ * `finished_at - (started_at ?? created_at)`. Anything missing stays null so
+ * the gallery renders 「耗时未记录」 instead of inventing a number.
+ */
+export function resolveJobDurationMs(
+  source: unknown,
+  fallbackCreatedAt?: string | null
+): number | null {
+  if (!isPlainObject(source)) return null
+  const direct = numOrNull(source.duration_ms)
+  if (direct !== null && direct >= 0) return Math.round(direct)
+  const elapsedMs = numOrNull(source.elapsed_ms)
+  if (elapsedMs !== null && elapsedMs >= 0) return Math.round(elapsedMs)
+  const elapsedS = numOrNull(source.elapsed_s)
+  if (elapsedS !== null && elapsedS >= 0) return Math.round(elapsedS * 1000)
+  const durationS = numOrNull(source.duration_s)
+  if (durationS !== null && durationS >= 0) return Math.round(durationS * 1000)
+  const finished = tsOrNull(source.finished_at)
+  const started =
+    tsOrNull(source.started_at) ??
+    tsOrNull(source.created_at) ??
+    tsOrNull(fallbackCreatedAt)
+  if (finished !== null && started !== null && finished >= started) return finished - started
+  return null
+}
+
 /** #89b gallery projection: only image jobs, URLs always via the proxy. */
 export interface GalleryItem {
   id: string
@@ -1885,6 +2266,8 @@ export interface GalleryItem {
   steps: number | null
   denoise: number | null
   elapsed_s: number | null
+  /** #139: real duration in ms, null when neither state nor timestamps can prove it. */
+  duration_ms: number | null
   images: Array<{ name: string; url: string }>
   cover_url: string | null
 }
@@ -1929,6 +2312,7 @@ export function buildGalleryItem(
     steps: num('steps'),
     denoise: num('denoise'),
     elapsed_s: typeof detail?.elapsed_s === 'number' ? detail.elapsed_s : null,
+    duration_ms: resolveJobDurationMs(detail, meta?.created_at ?? null),
     images,
     cover_url: cover?.url ?? null
   }
@@ -2208,6 +2592,10 @@ export async function handleStudioRoute(
 
   const jobMatch = pathname.match(/^\/api\/studio\/jobs\/([^/]+)$/)
   if (jobMatch) {
+    if (method === 'DELETE') {
+      await deleteJob(ctx, req, res, jobMatch[1])
+      return true
+    }
     if (method !== 'GET' && method !== 'HEAD') {
       ctx.sendJson(res, 405, { error: 'method not allowed' })
       return true

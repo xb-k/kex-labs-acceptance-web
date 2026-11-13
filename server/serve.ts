@@ -11,7 +11,7 @@ import http from 'node:http'
 import https from 'node:https'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { handler } from './api'
+import { handler, startStudioRetentionSweep } from './api'
 import { closeDb, dbEnabled } from './db'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -224,6 +224,8 @@ server.listen(PORT, HOST, () => {
   console.log(
     `[acceptance-web] listening on http://${HOST}:${PORT} (dist=${DIST_DIR}, dataSource=${dbEnabled() ? 'postgres' : 'files'}, upstream=${UPSTREAM_RAW ?? 'local'})`
   )
+  // #140: image-job retention runs once at boot, then hourly (proxy mode has no data root).
+  if (!UPSTREAM_URL) startStudioRetentionSweep()
 })
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

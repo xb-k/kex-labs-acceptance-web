@@ -52,6 +52,7 @@ import {
   fetchStudioArtifactJson,
   fetchStudioJobDetail,
   handleStudioRoute,
+  startImageRetentionSweep,
   studioArtifactReadable,
   type Job as StudioJob,
   type StudioContext
@@ -4428,7 +4429,8 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       sendJson,
       readJson,
       atomicWriteJson,
-      readBody: readRequestBody
+      readBody: readRequestBody,
+      authorizeTaskWrite: (r) => authorizeTaskWrite(r)
     })
     return
   }
@@ -5555,6 +5557,11 @@ function studioContext(): StudioContext {
     atomicWriteJson,
     readBody: readRequestBody
   }
+}
+
+/** #140: boot + hourly retention sweep, started by `serve.ts` (not tests). */
+export function startStudioRetentionSweep(intervalMs?: number): () => void {
+  return startImageRetentionSweep(() => studioContext(), intervalMs)
 }
 
 /** #86e: the source URL can exist while the uploaded file is gone. */
