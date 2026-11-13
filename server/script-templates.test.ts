@@ -19,7 +19,7 @@ import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   GITHUB_SCRIPT_TEMPLATES,
-  TEMPLATE_OVERRIDES_RELATIVE_PATH,
+  templateOverridesRelativePath,
   listMergedScriptTemplates,
   removeTemplateOverride,
   saveTemplateOverride,
@@ -58,7 +58,7 @@ function atomicWriteJson(file: string, value: unknown) {
   fs.renameSync(tmp, file)
 }
 
-function writeOverride(root: string, value: unknown, file = TEMPLATE_OVERRIDES_RELATIVE_PATH) {
+function writeOverride(root: string, value: unknown, file = templateOverridesRelativePath()) {
   atomicWriteJson(path.join(root, file), value)
 }
 
@@ -255,7 +255,7 @@ test('saveTemplateOverride 原子写入 canonical，removeTemplateOverride 恢�
   })
   assert.equal(saved.label, '新叙事标签')
   assert.equal(saved.source, 'override')
-  assert.deepEqual(readJson(path.join(root, TEMPLATE_OVERRIDES_RELATIVE_PATH)), {
+  assert.deepEqual(readJson(path.join(root, templateOverridesRelativePath())), {
     narrative: { label: '新叙事标签', recommendedDurationS: 45 }
   })
 
@@ -263,7 +263,7 @@ test('saveTemplateOverride 原子写入 canonical，removeTemplateOverride 恢�
   assert.equal(removed.removed, true)
   assert.equal(removed.item.label, EXPECTED_DEFAULTS[2].label)
   assert.equal(removed.item.source, 'default')
-  assert.deepEqual(readJson(path.join(root, TEMPLATE_OVERRIDES_RELATIVE_PATH)), {})
+  assert.deepEqual(readJson(path.join(root, templateOverridesRelativePath())), {})
 
   const second = removeTemplateOverride({ dataRoot: root, id: 'narrative', readJson, atomicWriteJson })
   assert.equal(second.removed, false)

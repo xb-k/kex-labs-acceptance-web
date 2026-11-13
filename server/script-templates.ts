@@ -179,13 +179,17 @@ const TEXT_FIELD_LIMITS: Record<string, number> = {
   githubStandard: 200
 }
 
-/** Canonical override store relative to `WEB_DATA_ROOT` (#134). */
-export const TEMPLATE_OVERRIDES_RELATIVE_PATH = path.join('script-templates', 'overrides.json')
+/** Canonical override store relative to `WEB_DATA_ROOT` (#134).
+ * Function (not a top-level const) so the browser bundle can tree-shake this
+ * server-only module without executing `node:path` at import time. */
+export function templateOverridesRelativePath(): string {
+  return path.join('script-templates', 'overrides.json')
+}
 /** Pre-#134 store; still read when the canonical file is absent. */
 const LEGACY_OVERRIDES_FILENAME = 'script-templates-overrides.json'
 
 export function templateOverridesFile(dataRoot: string): string {
-  return path.join(dataRoot, TEMPLATE_OVERRIDES_RELATIVE_PATH)
+  return path.join(dataRoot, templateOverridesRelativePath())
 }
 
 export function isScriptTemplateId(value: unknown): value is VideoTemplateId {
@@ -347,7 +351,7 @@ export function readTemplateOverrides(
     stored = readJson(path.join(dataRoot, LEGACY_OVERRIDES_FILENAME))
     if (stored !== null && stored !== undefined) {
       warnings.push(
-        `legacy ${LEGACY_OVERRIDES_FILENAME} read; next write migrates to ${TEMPLATE_OVERRIDES_RELATIVE_PATH}`
+        `legacy ${LEGACY_OVERRIDES_FILENAME} read; next write migrates to ${templateOverridesRelativePath()}`
       )
     }
   }
