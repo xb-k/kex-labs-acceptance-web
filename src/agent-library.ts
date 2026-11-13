@@ -15,6 +15,7 @@ export interface LibraryEntry {
   sha: string
   fetched_at: string
   score: number
+  score_parts?: { star: number; recency: number; relevance: number }
   warnings: string[]
   tier: 'A' | 'B'
   verified: boolean

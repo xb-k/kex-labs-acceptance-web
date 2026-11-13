@@ -38,14 +38,26 @@ export const TIER_A_STARS = 2000
 export const MAX_REPO_AGE_DAYS = 365
 export const MAX_FILE_BYTES = 256 * 1024
 export const MAX_FILES_PER_RUN = 50
+/** Same-repo cap so one viral repo cannot flood the whole manifest (#155). */
+export const MAX_FILES_PER_REPO = 10
 const SEARCH_PER_PAGE = 20
 const FETCH_TIMEOUT_MS = 15_000
 const MAX_ERRORS = 100
 const MAX_LIBRARY_LIMIT = 200
 
 const ALLOWED_EXT = new Set(['.md', '.json', '.yaml', '.yml'])
-const IGNORED_SEGMENTS = new Set([
+/** Only agent/skill/prompt collections qualify (#155); `.github/actions` etc. are noise. */
+const ALLOWED_ROOTS = ['skills/', 'agents/', 'prompts/', '.claude/skills/', '.agent/']
+/** README files are only useful at the root of these directories. */
+const README_ROOTS = new Set(['skills', 'agents', 'prompts'])
+/** Directories that never carry library content; extendable via `excludedSegments`. */
+export const EXCLUDED_SEGMENTS = new Set([
+  '.github',
+  'actions',
+  'workflows',
   'node_modules',
+  'fixtures',
+  'examples',
   '.git',
   'dist',
   'build',
@@ -84,6 +96,15 @@ const WARNING_PATTERNS: Array<{ code: string; re: RegExp }> = [
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 
+export interface ScoreParts {
+  /** log-normalised stars, 0–100 (1k→50, 10k→80, 50k→95). */
+  star: number
+  /** monthly-decayed freshness, 0–100 (pushed today→100, 12 months→0). */
+  recency: number
+  /** keyword hits in repo description / topics / file path, 0–100. */
+  relevance: number
+}
+
 export interface LibraryEntry {
   repo: string
   path: string
@@ -93,6 +114,8 @@ export interface LibraryEntry {
   sha: string
   fetched_at: string
   score: number
+  /** Component breakdown behind `score`, surfaced for the UI (#155). */
+  score_parts: ScoreParts
   warnings: string[]
   tier: 'A' | 'B'
   verified: boolean
@@ -141,6 +164,8 @@ export interface AgentSyncDeps {
   env?: NodeJS.ProcessEnv
   now?: () => Date
   log?: (message: string) => void
+  /** Extra directory names to exclude on top of `EXCLUDED_SEGMENTS`. */
+  excludedSegments?: string[]
 }
 
 export interface AgentLibraryRouteContext {
@@ -175,7 +200,10 @@ interface ClassifiedRepo {
   verified: boolean
   tier: 'A' | 'B'
   score: number
+  score_parts: ScoreParts
   pushed_at: string
+  /** Repo name + description + topics, reused to score individual file paths. */
+  relevance_text: string
 }
 
 /** In-process lock keyed by resolved dataRoot. One run at a time, per process. */
@@ -352,14 +380,60 @@ function pushedDaysAgo(pushedAt: string | null, now: Date): number | null {
   return (now.getTime() - pushed) / 86_400_000
 }
 
-function relevance(repo: GithubRepo, query: string): number {
-  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean)
-  if (tokens.length === 0) return 0
-  const haystack = [repo.full_name, repo.description ?? '', ...(repo.topics ?? [])]
-    .join(' ')
-    .toLowerCase()
-  const hit = tokens.filter((token) => haystack.includes(token)).length
-  return hit / tokens.length
+function round2(value: number): number {
+  return Number(value.toFixed(2))
+}
+
+function queryTokens(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean))]
+}
+
+function repoHaystack(repo: GithubRepo): string {
+  return [repo.full_name, repo.description ?? '', ...(repo.topics ?? [])].join(' ')
+}
+
+/**
+ * #155: log-normalised stars anchored at 1k→50, 10k→80, 50k→95. Linear between
+ * anchors in log10 space, clamped to 0–100. Beats the old `min(40, 10·log10)`
+ * which saturated at 10k and handed every big repo the same component.
+ */
+export function starScore(stars: number): number {
+  if (!Number.isFinite(stars) || stars <= 0) return 0
+  const anchors = [
+    { x: Math.log10(1000), y: 50 },
+    { x: Math.log10(10000), y: 80 },
+    { x: Math.log10(50000), y: 95 }
+  ]
+  const x = Math.log10(stars)
+  let y: number
+  if (x <= anchors[1].x) {
+    y = anchors[0].y + ((x - anchors[0].x) * (anchors[1].y - anchors[0].y)) / (anchors[1].x - anchors[0].x)
+  } else {
+    y = anchors[1].y + ((x - anchors[1].x) * (anchors[2].y - anchors[1].y)) / (anchors[2].x - anchors[1].x)
+  }
+  return round2(Math.min(100, Math.max(0, y)))
+}
+
+/** #155: monthly decay — pushed today → 100, 12 months → 0 (clamped). */
+export function recencyScore(pushedAt: string | null, now: Date): number {
+  const days = pushedDaysAgo(pushedAt, now)
+  if (days === null) return 0
+  const months = Math.max(0, days) / (MAX_REPO_AGE_DAYS / 12)
+  return round2(Math.max(0, 100 - (100 / 12) * months))
+}
+
+/** #155: share of query keywords present in repo metadata and/or the file path. */
+export function relevanceScore(tokens: readonly string[], haystack: string): number {
+  const unique = [...new Set(tokens.map((token) => token.toLowerCase()).filter(Boolean))]
+  if (unique.length === 0) return 0
+  const text = haystack.toLowerCase()
+  const hits = unique.filter((token) => text.includes(token)).length
+  return round2((hits / unique.length) * 100)
+}
+
+/** #155: explainable weighted score — 0.55·star + 0.25·recency + 0.20·relevance. */
+export function combineScore(parts: ScoreParts): number {
+  return round2(0.55 * parts.star + 0.25 * parts.recency + 0.2 * parts.relevance)
 }
 
 /**
@@ -386,12 +460,12 @@ export function classifyRepo(
   if (age === null) return { ok: false, reason: 'invalid_pushed_at' }
   if (age > MAX_REPO_AGE_DAYS) return { ok: false, reason: 'stale' }
 
-  const relat = relevance(repo, query)
-  const starScore = Math.min(40, 10 * Math.log10(Math.max(stars, 1)))
-  const recencyScore = Math.max(0, 20 * (1 - age / MAX_REPO_AGE_DAYS))
-  const score = Number(
-    (starScore + relat * 30 + recencyScore + (verified ? 10 : 0)).toFixed(2)
-  )
+  const haystack = repoHaystack(repo)
+  const score_parts: ScoreParts = {
+    star: starScore(stars),
+    recency: recencyScore(repo.pushed_at, now),
+    relevance: relevanceScore(queryTokens(query), haystack)
+  }
   return {
     ok: true,
     value: {
@@ -400,8 +474,10 @@ export function classifyRepo(
       license,
       verified,
       tier: stars >= TIER_A_STARS ? 'A' : 'B',
-      score,
-      pushed_at: repo.pushed_at as string
+      score: combineScore(score_parts),
+      score_parts,
+      pushed_at: repo.pushed_at as string,
+      relevance_text: haystack
     }
   }
 }
@@ -415,15 +491,59 @@ export function scanWarnings(text: string): string[] {
   return warnings
 }
 
-/** File-path gate: extension, ignored directories and traversal attempts. */
-export function isAllowedPath(filePath: string): boolean {
+/**
+ * #155 file-path gate: only agent/skill/prompt collections, text extensions,
+ * no traversal, no `.github/actions` / `workflows` / test-fixture noise.
+ * `extraExcluded` lets callers tighten the default segment list.
+ */
+export function isAllowedPath(filePath: string, extraExcluded: readonly string[] = []): boolean {
   if (typeof filePath !== 'string' || filePath.length === 0) return false
   if (filePath.includes('\0') || filePath.includes('\\')) return false
   if (filePath.startsWith('/') || /^[A-Za-z]:/.test(filePath)) return false
   const segments = filePath.split('/')
   if (segments.some((segment) => segment === '..' || segment === '.' || segment === '')) return false
-  if (segments.some((segment) => IGNORED_SEGMENTS.has(segment.toLowerCase()))) return false
-  return ALLOWED_EXT.has(path.posix.extname(filePath).toLowerCase())
+  if (!ALLOWED_EXT.has(path.posix.extname(filePath).toLowerCase())) return false
+
+  const extra = extraExcluded.map((segment) => segment.toLowerCase())
+  const excluded = (segment: string) => {
+    const lower = segment.toLowerCase()
+    return EXCLUDED_SEGMENTS.has(lower) || lower.startsWith('test') || extra.includes(lower)
+  }
+  if (segments.slice(0, -1).some(excluded)) return false
+
+  const lower = filePath.toLowerCase()
+  if (!ALLOWED_ROOTS.some((root) => lower.startsWith(root))) return false
+
+  // README files are noise unless they sit directly under skills/agents/prompts.
+  const base = segments[segments.length - 1].toLowerCase()
+  if (base.includes('readme')) {
+    return segments.length === 2 && README_ROOTS.has(segments[0].toLowerCase())
+  }
+  return true
+}
+
+/** #155: at most `MAX_FILES_PER_REPO` entries survive per repo, best score first. */
+function capPerRepo(entries: LibraryEntry[]): LibraryEntry[] {
+  const byRepo = new Map<string, LibraryEntry[]>()
+  for (const entry of entries) {
+    const bucket = byRepo.get(entry.repo) ?? []
+    bucket.push(entry)
+    byRepo.set(entry.repo, bucket)
+  }
+  const capped: LibraryEntry[] = []
+  for (const bucket of byRepo.values()) {
+    bucket.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+    capped.push(...bucket.slice(0, MAX_FILES_PER_REPO))
+  }
+  return capped
+}
+
+/** #155: keep only entries that still pass the current gate, capped per repo. */
+function pruneManifestEntries(entries: LibraryEntry[], extraExcluded: readonly string[]): LibraryEntry[] {
+  const valid = entries.filter(
+    (entry) => entry.score_parts && isAllowedPath(entry.path, extraExcluded)
+  )
+  return capPerRepo(valid)
 }
 
 function rawUrl(repo: string, filePath: string): string {
@@ -531,6 +651,15 @@ async function runAgentSync(deps: AgentSyncDeps): Promise<SyncStatus> {
   fs.mkdirSync(root, { recursive: true })
 
   const previous = readManifestFile(dataRoot)
+  const extraExcluded =
+    deps.excludedSegments ??
+    (env.AGENT_SYNC_EXCLUDED_SEGMENTS ?? '')
+      .split(',')
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+  // #155: purge entries that fail the tightened path gate or predate score_parts,
+  // so a deployed re-sync actually clears `.github/actions` noise from the manifest.
+  const kept = pruneManifestEntries(previous.entries, extraExcluded)
   const counts = emptyCounts()
   const errors: SyncError[] = []
   const auth: SyncStatus['auth'] = env.GITHUB_TOKEN?.trim() ? 'token' : 'anonymous'
@@ -591,7 +720,7 @@ async function runAgentSync(deps: AgentSyncDeps): Promise<SyncStatus> {
     // 2. Mirror files, dedupe by sha256 against the previous manifest and
     // within this run, cap at MAX_FILES_PER_RUN.
     const imported: LibraryEntry[] = []
-    const seenShas = new Set(previous.entries.map((entry) => entry.sha))
+    const seenShas = new Set(kept.map((entry) => entry.sha))
     const repoRoot = path.resolve(root, 'repos')
 
     for (const selectedRepo of selected) {
@@ -615,7 +744,7 @@ async function runAgentSync(deps: AgentSyncDeps): Promise<SyncStatus> {
           counts.files_rejected++
           continue
         }
-        if (!isAllowedPath(blob.path)) {
+        if (!isAllowedPath(blob.path, extraExcluded)) {
           counts.files_rejected++
           continue
         }
@@ -626,6 +755,8 @@ async function runAgentSync(deps: AgentSyncDeps): Promise<SyncStatus> {
         picked.push(blob)
       }
       picked.sort((a, b) => a.path.localeCompare(b.path))
+      // #155: hard cap per repo so one repo can never fill the manifest.
+      picked.splice(MAX_FILES_PER_REPO)
 
       for (const blob of picked) {
         if (rateLimited || counts.files_imported >= MAX_FILES_PER_RUN) break
@@ -686,6 +817,16 @@ async function runAgentSync(deps: AgentSyncDeps): Promise<SyncStatus> {
         const text = bytes.toString('utf8')
         const warnings = scanWarnings(text)
         if (warnings.length > 0) counts.warnings++
+        // #155: relevance also looks at the file path, so two files from the
+        // same repo can rank differently.
+        const score_parts: ScoreParts = {
+          star: selectedRepo.score_parts.star,
+          recency: selectedRepo.score_parts.recency,
+          relevance: relevanceScore(
+            queryTokens(selectedRepo.query),
+            `${selectedRepo.relevance_text} ${blob.path}`
+          )
+        }
         imported.push({
           repo: selectedRepo.repo,
           path: blob.path,
@@ -694,7 +835,8 @@ async function runAgentSync(deps: AgentSyncDeps): Promise<SyncStatus> {
           license: selectedRepo.license,
           sha: digest,
           fetched_at: now().toISOString(),
-          score: selectedRepo.score,
+          score: combineScore(score_parts),
+          score_parts,
           warnings,
           tier: selectedRepo.tier,
           verified: selectedRepo.verified
@@ -703,13 +845,13 @@ async function runAgentSync(deps: AgentSyncDeps): Promise<SyncStatus> {
       }
     }
 
-    // 3. Manifest is cumulative: previous entries survive unless a run replaced
-    // nothing (dedupe guarantees shas stay unique).
+    // 3. Manifest is cumulative but pruned: entries that fail the current path
+    // gate (or predate score_parts) are dropped, and each repo stays capped.
     const generatedAt = now().toISOString()
     atomicWriteJson(manifestFile(dataRoot), {
       version: 1,
       generated_at: generatedAt,
-      entries: [...previous.entries, ...imported]
+      entries: capPerRepo([...kept, ...imported])
     } satisfies SyncManifest)
 
     return finishStatus(dataRoot, {
