@@ -1212,7 +1212,8 @@ function buildSummary(ctx: StudioContext, item: any): JobSummary {
     error: typeof item?.error === 'string' ? item.error : null,
     stage: projection.stage,
     verdict: projection.verdict,
-    duration_ms: resolveJobDurationMs(item, createdAt)
+    // #153: pass the real web creation stamp only — never the coerced updatedAt.
+    duration_ms: resolveJobDurationMs(item, meta?.created_at ?? null)
   }
 }
 
@@ -2279,8 +2280,10 @@ function tsOrNull(value: unknown): number | null {
 /**
  * #139: real generation duration in ms, never estimated.
  * Priority mirrors the ticket: intake/state duration fields first, then
- * `finished_at - (started_at ?? created_at)`. Anything missing stays null so
- * the gallery renders 「耗时未记录」 instead of inventing a number.
+ * `finished_at - (started_at ?? created_at)`, then (#153) for terminal jobs
+ * only `updated_at - created_at` as the create→terminal wall time.
+ * Anything missing stays null so the gallery renders 「耗时未记录」 instead of
+ * inventing a number; running/queued never fall back to the last updated_at.
  */
 export function resolveJobDurationMs(
   source: unknown,
@@ -2301,7 +2304,19 @@ export function resolveJobDurationMs(
     tsOrNull(source.created_at) ??
     tsOrNull(fallbackCreatedAt)
   if (finished !== null && started !== null && finished >= started) return finished - started
+  // #153: terminal jobs with no explicit duration prove wall time via
+  // `updated_at - created_at` (the intake state always stamps both).
+  if (isTerminalState(source.state)) {
+    const created = tsOrNull(source.created_at) ?? tsOrNull(fallbackCreatedAt)
+    const updated = tsOrNull(source.updated_at)
+    if (created !== null && updated !== null && updated >= created) return updated - created
+  }
   return null
+}
+
+/** #153: only terminal states may use the create→updated fallback. */
+function isTerminalState(state: unknown): boolean {
+  return state === 'succeeded' || state === 'failed' || state === 'canceled'
 }
 
 /** #89b gallery projection: only image jobs, URLs always via the proxy. */
