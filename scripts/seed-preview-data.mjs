@@ -2,14 +2,30 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
+import { checkPreviewOutput, PREVIEW_DIRNAME } from './preview-data-guard.mjs'
 
+// 仅供手动执行：`node scripts/seed-preview-data.mjs`。不接入 npm build / dev / test，
+// 也不会被任何构建文件引用；所有写入必须落在 `.preview-data/`。
 const ROOT = process.cwd()
-const PREVIEW = path.join(ROOT, '.preview-data')
+const PREVIEW = path.join(ROOT, PREVIEW_DIRNAME)
 const DATA = path.join(PREVIEW, 'data')
 const KEX = path.join(PREVIEW, 'kex-repo')
 const LOGS = path.join(PREVIEW, 'logs')
 
+function assertPreviewTarget(target) {
+  const check = checkPreviewOutput({
+    target,
+    cwd: ROOT,
+    webDataRoot: process.env.WEB_DATA_ROOT
+  })
+  if (!check.ok) {
+    console.error(`[seed-preview-data] 拒绝写入：${check.reason}`)
+    process.exit(2)
+  }
+}
+
 function ensureDir(dir) {
+  assertPreviewTarget(dir)
   fs.mkdirSync(dir, { recursive: true })
 }
 

@@ -14,11 +14,6 @@ export type EnrichedJobItem = {
   updatedAt: string
 }
 
-const KNOWN_JOB_LABELS: Record<string, string> = {
-  '20261112_coffee_ad_001': '手冲咖啡品牌广告 · 15.2s',
-  '20261113_vlog_cafe_002': '咖啡师探店拉花 Vlog · 18.6s'
-}
-
 export function enrichAndFilterJobs(
   jobs: FlowJobSummary[],
   deliveries: Delivery[],
@@ -35,8 +30,8 @@ export function enrichAndFilterJobs(
   const enriched: EnrichedJobItem[] = jobs.map((j) => {
     const deliv = deliveryById.get(j.id)
     const isCurrentDone = currentJobId === j.id && (currentJobStage === 'F' || currentJobStage === 'done')
-    const isDelivered = Boolean(deliv) || isCurrentDone || j.id.includes('coffee_ad_001')
-    const title = deliv?.title?.trim() || KNOWN_JOB_LABELS[j.id] || j.id
+    const isDelivered = Boolean(deliv) || isCurrentDone
+    const title = deliv?.title?.trim() || j.id
     return {
       id: j.id,
       title,

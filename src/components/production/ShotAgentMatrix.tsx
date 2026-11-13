@@ -3,7 +3,6 @@ import { Check, Refresh, Split } from '../icons'
 import {
   AGENT_ROLES,
   type AgentRoleId,
-  type ShotRoleAction,
   type ShotStoryboardItem
 } from './production-data'
 
@@ -14,17 +13,13 @@ export function ShotAgentMatrix({
   selectedShotId,
   onSelectShot,
   roleFilter,
-  onRoleFilter,
-  actionStates,
-  onMarkAction
+  onRoleFilter
 }: {
   shots: ShotStoryboardItem[]
   selectedShotId: number
   onSelectShot: (shotId: number) => void
   roleFilter: AgentRoleId
   onRoleFilter: (role: AgentRoleId) => void
-  actionStates: Record<string, 'approved' | 'rejected'>
-  onMarkAction: (action: ShotRoleAction, state: 'approved' | 'rejected') => void
 }) {
   const [monitorStage, setMonitorStage] = useState<MonitorStage>('redrawn')
   const [compareSplit, setCompareSplit] = useState(false)
@@ -100,7 +95,10 @@ export function ShotAgentMatrix({
               <div className="flex items-center justify-between gap-2 text-[11px]">
                 <span className="num font-semibold text-apple-text">{shot.label}</span>
                 <span className="num text-apple-subtext">
-                  {shot.startS.toFixed(1)}s–{shot.endS.toFixed(1)}s ({shot.durationS.toFixed(1)}s)
+                  {shot.startS === null || shot.endS === null
+                    ? '区间未记录'
+                    : `${shot.startS.toFixed(1)}s–${shot.endS.toFixed(1)}s`}{' '}
+                  ({shot.durationS === null ? '时长未记录' : `${shot.durationS.toFixed(1)}s`})
                 </span>
               </div>
               <div className="mt-1 truncate text-[12.5px] font-medium text-apple-text" title={shot.sceneSummary}>
@@ -274,7 +272,6 @@ export function ShotAgentMatrix({
           <div className="mt-3 space-y-3">
             {visibleActions.map((act) => {
               const role = AGENT_ROLES.find((r) => r.id === act.role)!
-              const decisionState = actionStates[act.id]
               return (
                 <article
                   key={act.id}
@@ -295,27 +292,21 @@ export function ShotAgentMatrix({
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => onMarkAction(act, 'approved')}
-                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
-                          decisionState === 'approved'
-                            ? 'border-[#B7DFC4] bg-[#EAF8EE] text-[#1E7A3C]'
-                            : 'border-black/[0.08] bg-white text-apple-subtext hover:text-apple-text'
-                        }`}
+                        disabled
+                        title="尚未接入真实采纳接口，本轮不会写入任何处置状态"
+                        className="inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-black/[0.08] bg-white px-2 py-1 text-[11px] font-medium text-apple-subtext opacity-60 whitespace-nowrap"
                       >
                         <Check className="h-3 w-3" />
-                        {decisionState === 'approved' ? '已确认采纳' : '采纳'}
+                        采纳未接入
                       </button>
                       <button
                         type="button"
-                        onClick={() => onMarkAction(act, 'rejected')}
-                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
-                          decisionState === 'rejected'
-                            ? 'border-[#F3D3CF] bg-[#FCEDEB] text-[#B3261E]'
-                            : 'border-black/[0.08] bg-white text-apple-subtext hover:text-apple-text'
-                        }`}
+                        disabled
+                        title="尚未接入真实驳回接口，本轮不会触发重跑"
+                        className="inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-black/[0.08] bg-white px-2 py-1 text-[11px] font-medium text-apple-subtext opacity-60 whitespace-nowrap"
                       >
                         <Refresh className="h-3 w-3" />
-                        {decisionState === 'rejected' ? '已标记重跑' : '驳回重跑'}
+                        驳回重跑未接入
                       </button>
                     </div>
                   </div>

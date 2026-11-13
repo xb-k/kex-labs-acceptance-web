@@ -7,9 +7,7 @@ import { StageNodeTrack } from '../components/production/StageNodeTrack'
 import {
   buildPipelineNodes,
   buildStoryboard,
-  type AgentRoleId,
-  type PipelineNodeSpec,
-  type ShotRoleAction
+  type AgentRoleId
 } from '../components/production/production-data'
 import {
   Alert,
@@ -43,11 +41,6 @@ import type {
 
 const FLOW_POLL_MS = 3000
 const TELEMETRY_POLL_MS = 3500
-
-const JOB_TITLES: Record<string, string> = {
-  '20261112_coffee_ad_001': '手冲咖啡品牌广告 · 15.2s（阶段 F 已归档）',
-  '20261113_vlog_cafe_002': '咖啡师探店拉花 Vlog · 18.6s（阶段 D 渲染中）'
-}
 
 const ALERT_TONES: Record<OverviewAlert['type'], string> = {
   task_blocked: 'text-[#9A5B00]',
@@ -116,8 +109,6 @@ export function ProductionTrackerPage() {
   const [activeStageKey, setActiveStageKey] = useState<string>('D')
   const [selectedShotId, setSelectedShotId] = useState<number>(1)
   const [roleFilter, setRoleFilter] = useState<AgentRoleId>('all')
-  const [rerunBusyKey, setRerunBusyKey] = useState<string | null>(null)
-  const [actionStates, setActionStates] = useState<Record<string, 'approved' | 'rejected'>>({})
   const [alertFilter, setAlertFilter] = useState<'all' | OverviewAlert['type']>('all')
   const [decisionRoleFilter, setDecisionRoleFilter] = useState<string>('all')
 
@@ -239,25 +230,6 @@ export function ProductionTrackerPage() {
       briefsState.refresh()
     ])
     showToast('已同步最新节点、主机与交付数据')
-  }
-
-  const handleTriggerNodeRerun = async (node: PipelineNodeSpec) => {
-    setRerunBusyKey(node.key)
-    try {
-      await Promise.all([flow.refresh(), system.refresh(), briefsState.refresh()])
-      showToast(`已校验并刷新「${node.code} · ${node.title}」最新节点状态与产物`)
-    } finally {
-      setRerunBusyKey(null)
-    }
-  }
-
-  const handleMarkAction = (action: ShotRoleAction, next: 'approved' | 'rejected') => {
-    setActionStates((prev) => ({ ...prev, [action.id]: next }))
-    showToast(
-      next === 'approved'
-        ? `已采纳「${action.actionTitle}」处理结果`
-        : `已驳回「${action.tool}」，请检查 ${action.timestamp.split('·')[0].trim()} 节点参数`
-    )
   }
 
   return (
@@ -462,7 +434,7 @@ export function ProductionTrackerPage() {
           </div>
           <div className="mt-2 truncate text-[13.5px] font-semibold text-apple-text" title={job?.id}>
             {activeRenderingJobs.length > 0 && job
-              ? JOB_TITLES[job.id] ?? job.id
+              ? job.id
               : flow.status === 'loading'
                 ? '读取中…'
                 : '当前无渲染中任务'}
@@ -592,8 +564,6 @@ export function ProductionTrackerPage() {
         activeKey={effectiveStageKey}
         onSelectNode={setActiveStageKey}
         stageArtifacts={activeNodeArtifacts}
-        onTriggerNodeRerun={(n) => void handleTriggerNodeRerun(n)}
-        rerunBusyKey={rerunBusyKey}
       />
 
       {/* Section 2: Per-Shot Monitor & 6-Role Agent Collaboration Matrix */}
@@ -603,8 +573,6 @@ export function ProductionTrackerPage() {
         onSelectShot={setSelectedShotId}
         roleFilter={roleFilter}
         onRoleFilter={setRoleFilter}
-        actionStates={actionStates}
-        onMarkAction={handleMarkAction}
       />
 
       {/* Section 3: L3 Orchestrator Decision Audit Log (Active Job Execution Stream) */}

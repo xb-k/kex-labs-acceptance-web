@@ -102,15 +102,15 @@ export type ShotRoleAction = {
   diffBefore?: string
   diffAfter?: string
   candidates?: Array<{ name: string; score: string; picked: boolean; note: string }>
-  metrics?: Array<{ label: string; value: string; pass: boolean }>
+  metrics?: Array<{ label: string; value: string; pass: boolean | 'unknown' }>
 }
 
 export type ShotStoryboardItem = {
   shotId: number
   label: string
-  startS: number
-  endS: number
-  durationS: number
+  startS: number | null
+  endS: number | null
+  durationS: number | null
   sceneSummary: string
   pacingTag: string
   media: {
@@ -131,6 +131,109 @@ const ROLE_BY_STAGE: Record<string, Exclude<AgentRoleId, 'all'>> = {
   D: 'editor',
   E: 'colorist',
   F: 'audio'
+}
+
+export type QcBadgeState = 'pass' | 'fail' | 'unknown'
+
+/** 调色 ΔE2000 p95 的硬门禁阈值（与 policy/quality_thresholds.json 一致）。 */
+export const QC_COLOR_P95_THRESHOLD = 6
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function numberOf(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+/**
+ * 只读取 job 里真实存在的质量指标。先看 quality_gate，再看 quality；
+ * 同时兼容 `{ checks: [{ name, value }] }` 结构。缺失返回 null（上层显示「未记录」）。
+ */
+export function readQualityMetric(
+  job: FlowJob | null | undefined,
+  keys: string[]
+): number | null {
+  for (const source of [asRecord(job?.quality_gate), asRecord(job?.quality)]) {
+    if (!source) continue
+    for (const key of keys) {
+      const value = numberOf(source[key])
+      if (value !== null) return value
+    }
+    const checks = Array.isArray(source.checks) ? source.checks : []
+    for (const item of checks) {
+      const check = asRecord(item)
+      if (!check || typeof check.name !== 'string' || !keys.includes(check.name)) continue
+      const value = numberOf(check.value)
+      if (value !== null) return value
+    }
+  }
+  return null
+}
+
+/**
+ * QC 徽标：只有真实 `color_p95_de2000` 存在才可能显示 pass；
+ * 缺失或非数字一律 unknown，绝不回落到固定 PASS。
+ */
+export function qcBadgeState(job: FlowJob | null | undefined): QcBadgeState {
+  const colorP95 = readQualityMetric(job, ['color_p95_de2000', 'color_p95_delta_e2000'])
+  if (colorP95 === null) return 'unknown'
+  const verdict = asRecord(job?.quality_gate)?.verdict
+  if (typeof verdict === 'string' && verdict.toUpperCase() === 'FAIL') return 'fail'
+  return colorP95 <= QC_COLOR_P95_THRESHOLD ? 'pass' : 'fail'
+}
+
+export function qcBadgeLabel(state: QcBadgeState): string {
+  if (state === 'pass') return '门禁 PASS'
+  if (state === 'fail') return '门禁 FAIL'
+  return '门禁判定未记录'
+}
+
+export function qualityMetric(
+  job: FlowJob | null | undefined,
+  label: string,
+  keys: string[],
+  threshold: number,
+  op: 'lte' | 'gte',
+  unit = ''
+): { label: string; value: string; pass: boolean | 'unknown' } {
+  const value = readQualityMetric(job, keys)
+  if (value === null) return { label, value: '未记录', pass: 'unknown' }
+  const ok = op === 'lte' ? value <= threshold : value >= threshold
+  const symbol = op === 'lte' ? '≤' : '≥'
+  return { label, value: `${value} ${symbol} ${threshold}${unit}`, pass: ok }
+}
+
+function probeLabelOf(job: FlowJob | null | undefined): string {
+  const probe = asRecord(job?.probe)
+  const fps = numberOf(probe?.fps)
+  const width = numberOf(probe?.width)
+  const height = numberOf(probe?.height)
+  const parts: string[] = []
+  if (fps !== null) parts.push(`${fps}fps`)
+  if (width !== null && height !== null) parts.push(`${width}×${height}`)
+  return parts.length ? parts.join(' / ') : '规格未记录'
+}
+
+function stageTimeLabel(job: FlowJob | null | undefined, stageKey: string, label: string): string {
+  const stage = job?.stages?.find((s) => s.key === stageKey)
+  if (!stage?.updated_at) return label
+  const date = new Date(stage.updated_at)
+  if (Number.isNaN(date.getTime())) return label
+  return `${label} · ${date.toLocaleString('zh-CN', { hour12: false })}`
+}
+
+function seedOf(job: FlowJob | null | undefined, stageKey: string, index: number): number | null {
+  const prompts = job?.stages?.find((s) => s.key === stageKey)?.prompts ?? []
+  const prompt = prompts[index] ?? prompts.find((p) => p.shot_id === index + 1)
+  return numberOf(prompt?.seed)
 }
 
 export function buildPipelineNodes(
@@ -165,11 +268,15 @@ export function buildPipelineNodes(
     return 'pending'
   }
 
-  const profileName = String((job?.profile as Record<string, unknown> | null)?.name ?? 'ad_teal_orange')
-  const memFree = (job?.cold_warm as Record<string, unknown> | null)?.free_mem_gb
-  const typology = String(
-    ((job?.semantics as Record<string, unknown> | null)?.typology as string | undefined) ?? 'ad_product'
-  )
+  const profileName = typeof job?.profile?.name === 'string' ? job.profile.name : null
+  const memFree = numberOf((job?.cold_warm as Record<string, unknown> | null)?.free_mem_gb)
+  const semantics = asRecord(job?.semantics)
+  const typology = typeof semantics?.typology === 'string' ? semantics.typology : '未记录'
+  const confidence = numberOf(semantics?.confidence)
+  const confidenceLabel = confidence === null ? '未记录' : confidence.toFixed(2)
+  const qcState = qcBadgeState(job)
+  const colorP95 = readQualityMetric(job, ['color_p95_de2000', 'color_p95_delta_e2000'])
+  const probeLabel = probeLabelOf(job)
   const briefShotsCount = options?.brief?.polished?.shots?.length ?? job?.shots?.length ?? 0
 
   return [
@@ -194,7 +301,7 @@ export function buildPipelineNodes(
       memoryNote: 'Qwen2-VL-7B Q4 · ~6GB · 完结卸载',
       status: statusOf('B'),
       durationS: stageMap.get('B')?.duration_s ?? null,
-      progressNote: `主识别：${typology}（置信度 ${Number((job?.semantics as Record<string, unknown> | null)?.confidence ?? 0.91).toFixed(2)}）`,
+      progressNote: `主识别：${typology}（置信度 ${confidenceLabel}）`,
       contractSummary: '全镜头批量理解场景、主体 bbox、光影方向与情绪张力；阶段末尾强制 keep_alive=0 卸载 Ollama。'
     },
     {
@@ -205,8 +312,8 @@ export function buildPipelineNodes(
       role: 'director',
       memoryNote: '零显存 · 规则表一票否决',
       status: statusOf('B2'),
-      durationS: 0.2,
-      progressNote: `锁定风格：${profileName}`,
+      durationS: null,
+      progressNote: `锁定风格：${profileName ?? '未记录'}`,
       contractSummary: '确定性查表 policy/typology_map 决定调色 LUT、BGM 基调与活人感参数，写入 decision log 可审计重放。'
     },
     {
@@ -217,7 +324,7 @@ export function buildPipelineNodes(
       role: 'writer',
       memoryNote: '本地 LLM / Brief 契约 · 零 GPU 冲突',
       status: statusOf('SCRIPT'),
-      durationS: 4.8,
+      durationS: null,
       progressNote:
         statusOf('SCRIPT') === 'running'
           ? '正在生成 Logline、分场旁白与结构化分镜剧本…'
@@ -248,8 +355,9 @@ export function buildPipelineNodes(
       memoryNote: memFree != null ? `LTX-2B 独占 · 余量 ${memFree}GB` : 'LTX-2B 独占 8~24GB · 单项锁',
       status: statusOf('D'),
       durationS: stageMap.get('D')?.duration_s ?? null,
-      progressNote: statusOf('D') === 'running' ? '正在采样第 1 镜 (28/73 帧) · 单项锁保护中' : '多候选采样筛选低形变片段',
-      contractSummary: '确认 Ollama/SDXL 均已释放后独占 Metal；每镜头采样 2~3 候选，剔除 32 帧漂移样本。'
+      progressNote:
+        statusOf('D') === 'running' ? '正在采样第 1 镜 · 单项锁保护中' : '多候选采样筛选低形变片段',
+      contractSummary: '确认 Ollama/SDXL 均已释放后独占 Metal；每镜头多候选采样，剔除形变样本。'
     },
     {
       key: 'E',
@@ -260,8 +368,11 @@ export function buildPipelineNodes(
       memoryNote: 'RIFE + Real-ESRGAN ~4GB + LUT',
       status: statusOf('E'),
       durationS: stageMap.get('E')?.duration_s ?? null,
-      progressNote: statusOf('E') === 'done' ? '30fps / 1080p · ΔE2000 p95=2.85' : '排队等待阶段 D 释放模型锁',
-      contractSummary: '先 RIFE 补帧至 30fps，再 Real-ESRGAN 超分，最后以第 1 镜为基准执行 L1+L2+L3 LAB 颜色匹配。'
+      progressNote:
+        statusOf('E') === 'done'
+          ? `${probeLabel} · ${colorP95 === null ? 'ΔE2000 未记录' : `ΔE2000 p95=${colorP95}`}`
+          : '排队等待阶段 D 释放模型锁',
+      contractSummary: '先插帧，再超分，最后以第 1 镜为基准执行 L1+L2+L3 LAB 颜色匹配。'
     },
     {
       key: 'F',
@@ -272,8 +383,11 @@ export function buildPipelineNodes(
       memoryNote: '本地封装 · rsync 校验入 RAID1',
       status: statusOf('F'),
       durationS: stageMap.get('F')?.duration_s ?? null,
-      progressNote: statusOf('F') === 'done' ? '活人感 + 7 项门禁 PASS · 已入冷归档' : '待阶段 E 输出调色片段',
-      contractSummary: '混入非循环 BGM 与环境底噪，按 J-cut 变速剪辑并核验活人感 5 维指标，校验 sha256 后推入 NAS。'
+      progressNote:
+        statusOf('F') === 'done'
+          ? `${qcBadgeLabel(qcState)} · 已入冷归档`
+          : '待阶段 E 输出调色片段',
+      contractSummary: '混入非循环 BGM 与环境底噪，按 J-cut 变速剪辑并核验活人感与硬门禁指标，校验 sha256 后推入 NAS。'
     }
   ]
 }
@@ -297,39 +411,32 @@ export function buildStoryboard(job: FlowJob | null, brief?: StudioBrief | null)
     return filtered[shotIndex]?.url ?? filtered[0]?.url ?? null
   }
 
-  const shots = job.shots.length
-    ? job.shots
-    : [
-        { shot_id: 1, start: 0, end: 3.8, duration_s: 3.8 },
-        { shot_id: 2, start: 3.8, end: 8.2, duration_s: 4.4 }
-      ]
+  const shots = job.shots ?? []
+  if (!shots.length) return []
 
-  const isAd = job.id.includes('coffee')
-  const profileName = String((job.profile as Record<string, unknown> | null)?.name ?? (isAd ? 'ad_teal_orange' : 'vlog_warm_film'))
-  const semSubject = String(
-    ((job.semantics as Record<string, unknown> | null)?.subject as Record<string, unknown> | undefined)?.name ??
-      (isAd ? '手冲咖啡杯与黄铜滤杯' : '咖啡师手部拉花特写')
-  )
+  const semSubjectRaw = asRecord(asRecord(job.semantics)?.subject)?.name
+  const semSubject = typeof semSubjectRaw === 'string' && semSubjectRaw.trim() ? semSubjectRaw : '主体未记录'
+  const profileName = typeof job.profile?.name === 'string' ? job.profile.name : null
+  const confidence = numberOf(asRecord(job.semantics)?.confidence)
+  const confidenceLabel = confidence === null ? '未记录' : confidence.toFixed(2)
+  const colorP95 = readQualityMetric(job, ['color_p95_de2000', 'color_p95_delta_e2000'])
 
   return shots.map((shot, idx) => {
     const shotNum = Number(shot.shot_id ?? idx + 1)
-    const startS = shot.start ?? idx * 3.8
-    const endS = shot.end ?? startS + (shot.duration_s ?? 3.6)
-    const durationS = shot.duration_s ?? Math.max(2.1, Number((endS - startS).toFixed(1)))
+    const startS = shot.start ?? null
+    const endS = shot.end ?? null
+    const durationS =
+      shot.duration_s ?? (startS !== null && endS !== null ? Number((endS - startS).toFixed(1)) : null)
+    const durationLabel = durationS === null ? '未记录' : `${durationS.toFixed(1)}s`
+    const rangeLabel =
+      startS === null || endS === null ? '未记录' : `${startS.toFixed(1)}s – ${endS.toFixed(1)}s`
 
     const origFrame = findStageMedia('A', idx, 'image') ?? findStageMedia('B', idx, 'image')
     const redrawnFrame = findStageMedia('C', idx, 'image')
     const i2vClip = findStageMedia('D', idx, 'video')
     const gradedClip = findStageMedia('F', 0, 'video') ?? findStageMedia('E', idx, 'video')
 
-    const sceneLabel =
-      idx === 0
-        ? `${semSubject} · 主视角定场`
-        : idx === 1
-          ? '手部注水 / 蒸汽动态中景'
-          : idx === 2
-            ? '器物细节与黄金光线特写'
-            : '收尾定格 · 品牌视觉落版'
+    const sceneLabel = idx === 0 ? `${semSubject} · 主视角定场` : `第 ${shotNum} 镜 · 场景描述未记录`
 
     const actions: ShotRoleAction[] = [
       {
@@ -337,13 +444,13 @@ export function buildStoryboard(job: FlowJob | null, brief?: StudioBrief | null)
         role: 'cinematographer',
         stageKey: 'A',
         tool: 'split_shots + extract_frames',
-        timestamp: 'Phase A · +00:04s',
+        timestamp: stageTimeLabel(job, 'A', 'Phase A'),
         actionTitle: `切出第 ${shotNum} 镜并避开运动模糊帧`,
-        inputFact: `原片区间 ${startS.toFixed(1)}s – ${endS.toFixed(1)}s（镜头时长 ${durationS.toFixed(1)}s）`,
+        inputFact: `原片区间 ${rangeLabel}（镜头时长 ${durationLabel}）`,
         decisionReason:
           idx === 0
-            ? 'PySceneDetect AdaptiveDetector 阈值 24.0；跳过前 0.4s 对焦呼吸，取 t=1.40s 锐度最高帧。'
-            : `保持非等长剪辑节奏（本镜 ${durationS.toFixed(1)}s 与上镜形成呼吸差，满足活人感 σ ≥ 0.6s）。`,
+            ? 'PySceneDetect AdaptiveDetector 自动阈值；跳过开场对焦呼吸，取锐度最高帧作为基准。'
+            : '保持非等长剪辑节奏，与相邻镜头形成呼吸差。',
         outputSummary: `输出 frames/shot_0${Math.min(2, shotNum)}.png 作为本镜语义与重绘基准帧`
       },
       {
@@ -351,23 +458,23 @@ export function buildStoryboard(job: FlowJob | null, brief?: StudioBrief | null)
         role: 'director',
         stageKey: 'B2',
         tool: 'describe_frames → select_profile',
-        timestamp: 'Phase B / B2 · +00:15s',
-        actionTitle: `语义锁定主体「${semSubject}」并挂载 ${profileName}`,
-        inputFact: `Qwen2-VL 识别：side golden_hour · 4200K · 置信度 ${idx === 0 ? '0.91' : '0.88'}`,
-        decisionReason: `按 policy/typology_map 确定性映射为 ${profileName}；写死边界「只改光影质地，不改变主体器型与数量」。`,
-        outputSummary: `挂载场景提示词 pt-v1.4 与调色预设 looks/${profileName}.cube`
+        timestamp: stageTimeLabel(job, 'B', 'Phase B / B2'),
+        actionTitle: `语义锁定主体「${semSubject}」并挂载 ${profileName ?? '未记录'}`,
+        inputFact: `Qwen2-VL 语义识别 · 置信度 ${confidenceLabel}`,
+        decisionReason: `按 policy/typology_map 确定性映射为 ${profileName ?? '未记录'}；只改光影质地，不改变主体器型与数量。`,
+        outputSummary: `挂载场景提示词 ${job.profile_prompt?.version ?? '版本未记录'} 与调色预设 ${profileName ? `looks/${profileName}.cube` : '未记录'}`
       },
       {
         id: `s${shotNum}-script`,
         role: 'writer',
         stageKey: 'SCRIPT',
         tool: 'polish_brief → build_shot_script',
-        timestamp: 'Phase B3 · +00:26s',
+        timestamp: stageTimeLabel(job, 'C', 'Phase B3'),
         actionTitle: `编写第 ${shotNum} 镜旁白台词与分镜剧本`,
         inputFact:
           brief?.polished?.shots?.[idx]
             ? `运镜「${brief.polished.shots[idx].camera ?? '自然手持'}」 · 时长 ${brief.polished.shots[idx].duration_s}s`
-            : `创意大纲 + Profile ${profileName} · 镜号 ${shotNum}`,
+            : `创意大纲 + Profile ${profileName ?? '未记录'} · 镜号 ${shotNum}`,
         decisionReason:
           brief?.polished?.logline ??
           '围绕情绪呼吸差分配旁白留白与画面推进节拍，严禁机械匀速旁白叠加。',
@@ -380,51 +487,45 @@ export function buildStoryboard(job: FlowJob | null, brief?: StudioBrief | null)
         role: 'writer',
         stageKey: 'C',
         tool: 'render_frames (SDXL)',
-        timestamp: 'Phase C · +00:44s',
+        timestamp: stageTimeLabel(job, 'C', 'Phase C'),
         actionTitle: `改写第 ${shotNum} 镜重绘 Prompt 并绑定固定 Seed`,
-        inputFact: `剧本分镜词 + Profile ${profileName} · Seed ${20261112 + idx}`,
-        decisionReason: '补足陶瓷釉面高光与轻微胶片颗粒描述，并在负向词禁止“蜡像感/过度锐化/均匀平移”。',
-        outputSummary: 'SDXL Base (8GB 独占) 生成 1024px 关键帧，抽检纹理保持自然颗粒',
-        diffBefore: `generic ${isAd ? 'coffee cup' : 'latte pour'}, soft lighting, 8k`,
-        diffAfter: `${isAd ? 'ceramic espresso cup, warm brass rim light, subtle rising steam' : '35mm warm film grain, natural window backlight on hand'}, shallow DOF 50mm, natural skin/ceramic micro-texture`
+        inputFact: `剧本分镜词 + Profile ${profileName ?? '未记录'} · Seed ${seedOf(job, 'C', idx) ?? '未记录'}`,
+        decisionReason: '补齐画面材质与胶片颗粒描述，负向词禁止“蜡像感/过度锐化/均匀平移”。',
+        outputSummary: 'SDXL Base 生成关键帧，抽检纹理保持自然颗粒'
       },
       {
         id: `s${shotNum}-editor`,
         role: 'editor',
         stageKey: 'D',
         tool: 'generate_clips (LTX-2B)',
-        timestamp: 'Phase D · +03:48s',
+        timestamp: stageTimeLabel(job, 'D', 'Phase D'),
         actionTitle:
           job.stage === 'D' && idx === 0
-            ? '正在执行 LTX-2B 多候选动态采样（28/73 帧）'
-            : `从 2 次 I2V 采集中筛选出最佳动态片段（弃用形变样本）`,
-        inputFact: `输入 rendered/shot_0${Math.min(2, shotNum)}_sdxl.png · 768×512 @24fps`,
+            ? '正在执行 LTX-2B 多候选动态采样'
+            : '从 I2V 采集中筛选最佳动态片段（弃用形变样本）',
+        inputFact: `输入 ${redrawnFrame ? 'C 阶段重绘关键帧' : '关键帧未记录'}`,
         decisionReason:
           job.stage === 'D'
-            ? '已确认 Ollama 与 SDXL 全部卸载，可用 Metal 31.2GB，单镜头互斥锁已持有。'
-            : '第 1 次采样在第 32 帧出现杯沿轻度融化（SSIM 0.84）；第 2 次调整 motion=0.22 后稳定通过。',
-        outputSummary: job.stage === 'D' ? '采样进行中，预计 2 分钟内完成筛选' : '选定 clip_02.mp4 交付 Phase E 插帧超分',
-        candidates:
-          job.stage === 'D'
-            ? undefined
-            : [
-                { name: 'clip_01.mp4', score: 'SSIM 0.841', picked: false, note: '第 32 帧杯口边缘轻微漂移，自动淘汰' },
-                { name: 'clip_02.mp4', score: 'SSIM 0.962', picked: true, note: '蒸汽连续且主体零形变，胜出' }
-              ]
+            ? '已确认 Ollama 与 SDXL 全部卸载，单镜头互斥锁已持有。'
+            : '按形变与连续性筛选 I2V 候选片段。',
+        outputSummary: job.stage === 'D' ? '采样进行中' : i2vClip ? '选定片段交付 Phase E 插帧超分' : 'I2V 片段未记录'
       },
       {
         id: `s${shotNum}-color`,
         role: 'colorist',
         stageKey: 'E',
         tool: 'interpolate → upscale → grade_color',
-        timestamp: 'Phase E · +04:40s',
-        actionTitle: `执行超分后三层色彩匹配（以 Shot 1 为参考基准）`,
-        inputFact: `RIFE 30fps → Real-ESRGAN 1080p → ${profileName}.cube`,
-        decisionReason: '严禁“先调色再超分”防止重采样偏色；以 shot_01 做 LAB 均值/方差仿射，match_strength=0.8。',
-        outputSummary: '跨镜头色彩漂移 p95 ΔE2000 = 2.85（≤ 6 达标），平坦区高光裁切 < 0.2%',
+        timestamp: stageTimeLabel(job, 'E', 'Phase E'),
+        actionTitle: '执行超分后三层色彩匹配（以 Shot 1 为参考基准）',
+        inputFact: `插帧 → 超分 → ${profileName ?? 'Profile 未记录'} 调色`,
+        decisionReason: '严禁“先调色再超分”防止重采样偏色；以 shot_01 做 LAB 均值/方差仿射。',
+        outputSummary:
+          colorP95 === null
+            ? '跨镜头色彩漂移 ΔE2000 未记录'
+            : `跨镜头色彩漂移 p95 ΔE2000 = ${colorP95}（≤ ${QC_COLOR_P95_THRESHOLD} 达标）`,
         metrics: [
-          { label: 'ΔE2000 p95', value: '2.85 ≤ 6', pass: true },
-          { label: '相邻帧亮度抖动', value: '1.4% < 3%', pass: true }
+          qualityMetric(job, 'ΔE2000 p95', ['color_p95_de2000', 'color_p95_delta_e2000'], QC_COLOR_P95_THRESHOLD, 'lte'),
+          { label: '相邻帧亮度抖动', value: '未记录', pass: 'unknown' as const }
         ]
       },
       {
@@ -432,14 +533,14 @@ export function buildStoryboard(job: FlowJob | null, brief?: StudioBrief | null)
         role: 'audio',
         stageKey: 'F',
         tool: 'synthesize_audio · quality_check · archive',
-        timestamp: 'Phase F · +04:50s',
+        timestamp: stageTimeLabel(job, 'F', 'Phase F'),
         actionTitle: '活人感混音节拍校验 & NAS 校验归档',
-        inputFact: `镜头时长 ${durationS.toFixed(1)}s · J-cut 提前 0.3s 切入环境音`,
-        decisionReason: '叠加低电平咖啡馆环境底噪，避开 8s BGM 自相关重复峰，验证全部 7 项硬门禁与活人感指标。',
-        outputSummary: '封装 H.264 AAC 192k 成片并经 sha256 校验落盘 NAS RAID1',
+        inputFact: `镜头时长 ${durationLabel} · J-cut 切入环境音`,
+        decisionReason: '叠加低电平环境底噪，避开 BGM 自相关重复峰，验证硬门禁与活人感指标。',
+        outputSummary: '封装成片并经 sha256 校验落盘 NAS RAID1',
         metrics: [
-          { label: '镜头时长 σ', value: '0.72s ≥ 0.6s', pass: true },
-          { label: '音频动态范围', value: '11.4 LU > 8', pass: true }
+          qualityMetric(job, '镜头时长 σ', ['shot_duration_stddev_s'], 0.6, 'gte', 's'),
+          qualityMetric(job, '音频动态范围', ['audio_dynamic_range_lu', 'audio_dynamic_range'], 8, 'gte', ' LU')
         ]
       }
     ]
@@ -451,7 +552,7 @@ export function buildStoryboard(job: FlowJob | null, brief?: StudioBrief | null)
       endS,
       durationS,
       sceneSummary: sceneLabel,
-      pacingTag: durationS >= 4.0 ? '长呼吸镜' : '中快切镜',
+      pacingTag: durationS === null ? '时长未记录' : durationS >= 4.0 ? '长呼吸镜' : '中快切镜',
       media: {
         originalFrame: origFrame,
         redrawnFrame,

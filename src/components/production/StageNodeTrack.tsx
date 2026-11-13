@@ -11,9 +11,7 @@ export function StageNodeTrack({
   nodes,
   activeKey,
   onSelectNode,
-  stageArtifacts,
-  onTriggerNodeRerun,
-  rerunBusyKey
+  stageArtifacts
 }: {
   job?: FlowJob | null
   brief?: StudioBrief | null
@@ -22,8 +20,6 @@ export function StageNodeTrack({
   activeKey: string
   onSelectNode: (key: string) => void
   stageArtifacts: FlowArtifact[]
-  onTriggerNodeRerun: (node: PipelineNodeSpec) => void
-  rerunBusyKey: string | null
 }) {
   const activeNode = nodes.find((n) => n.key === activeKey) ?? nodes[0]
   const roleMeta = AGENT_ROLES.find((r) => r.id === activeNode?.role)
@@ -73,12 +69,12 @@ export function StageNodeTrack({
             <div className="flex flex-wrap items-center gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => onTriggerNodeRerun(activeNode)}
-                disabled={rerunBusyKey === activeNode.key}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-apple-text px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-black/85 disabled:opacity-60 whitespace-nowrap"
+                disabled
+                title="尚未接入真实重跑接口，本轮不会触发任何执行"
+                className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg bg-apple-text px-3 py-1.5 text-xs font-medium text-white opacity-60 whitespace-nowrap"
               >
-                <Refresh className={`h-3.5 w-3.5 ${rerunBusyKey === activeNode.key ? 'animate-spin' : ''}`} />
-                {rerunBusyKey === activeNode.key ? '正在同步节点状态…' : `校验并刷新节点 (${activeNode.code})`}
+                <Refresh className="h-3.5 w-3.5" />
+                {`重跑未接入 (${activeNode.code})`}
               </button>
               {activeNode.key === 'SCRIPT' && (
                 <Link
