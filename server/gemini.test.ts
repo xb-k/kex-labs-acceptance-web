@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { after, beforeEach } from 'node:test'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { authorizeTaskWrite } from './api'
 import {
   buildLocalHistoricalContext,
   buildScriptMarkdownFromScenes,
+  handleGeminiRoute,
   isRetryableGeminiError,
   normalizeFrameAnalysis,
   normalizeGeneratedScript,
@@ -344,4 +347,201 @@ test('discoverGiteaPromptFiles & agentDiscoverAndSyncGiteaTemplates autonomously
     if (prevUrl === undefined) delete process.env.GITEA_URL
     else process.env.GITEA_URL = prevUrl
   }
+})
+
+// ---------------------------------------------------------------------------
+// #124/#127 POST /api/gemini/script: Gemini preferred, Ollama JSON fallback.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_JSON = {
+  title: '山城早班车',
+  logline: '一位夜班护士在清晨第一班轻轨上找回生活的秩序。',
+  tone: '克制温暖 · 纪实',
+  style: '35mm 自然光，低饱和青橙',
+  optimization_notes: '按纪录片模板压缩节奏',
+  duration_s: 12,
+  scenes: [
+    {
+      scene_no: 1,
+      timecode: '00:00 - 00:03',
+      duration_s: 3,
+      shot_type: '中景 · 35mm',
+      camera: '缓慢推进',
+      continuity_anchor: '晨雾方向与车窗反光保持一致',
+      visual: '护士靠在车窗边，晨光扫过袖口',
+      video_prompt: 'medium shot, 35mm, slow push-in, nurse by window, soft dawn light, 24fps',
+      voiceover: '（车厢环境声）',
+      audio: '低频车厢轰鸣与轻微刹车声'
+    },
+    {
+      scene_no: 2,
+      timecode: '00:03 - 00:07',
+      duration_s: 4,
+      shot_type: '特写 · 50mm',
+      camera: '手持跟随',
+      continuity_anchor: '袖口与上一镜同款',
+      visual: '手指摩挲工牌边缘',
+      video_prompt: 'close-up, 50mm, handheld, fingers on badge, dawn light, 24fps',
+      voiceover: '今天可以慢一点。',
+      audio: '钢琴单音与车厢底噪'
+    }
+  ]
+}
+
+const SAME_ORIGIN_HEADERS = { host: '127.0.0.1:8088', origin: 'http://127.0.0.1:8088' }
+const savedEnv = {
+  gemini: process.env.GEMINI_API_KEY,
+  ollama: process.env.OLLAMA_URL,
+  model: process.env.OLLAMA_TEXT_MODEL,
+  token: process.env.WEB_WRITE_TOKEN
+}
+
+beforeEach(() => {
+  delete process.env.GEMINI_API_KEY
+  delete process.env.WEB_WRITE_TOKEN
+  process.env.OLLAMA_URL = 'http://127.0.0.1:11499'
+  process.env.OLLAMA_TEXT_MODEL = 'script-test-model'
+})
+
+after(() => {
+  const restore = (key: 'GEMINI_API_KEY' | 'OLLAMA_URL' | 'OLLAMA_TEXT_MODEL' | 'WEB_WRITE_TOKEN', value?: string) => {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  restore('GEMINI_API_KEY', savedEnv.gemini)
+  restore('OLLAMA_URL', savedEnv.ollama)
+  restore('OLLAMA_TEXT_MODEL', savedEnv.model)
+  restore('WEB_WRITE_TOKEN', savedEnv.token)
+})
+
+async function callScript(
+  body: unknown,
+  headers: Record<string, string> = SAME_ORIGIN_HEADERS
+): Promise<{ handled: boolean; status: number; body: any }> {
+  let captured: { status: number; body: any } = { status: 0, body: null }
+  const req = {
+    method: 'POST',
+    url: '/api/gemini/script',
+    headers
+  } as unknown as IncomingMessage
+  const res = { statusCode: 0, setHeader() {}, end() {} } as unknown as ServerResponse
+  const handled = await handleGeminiRoute(req, res, '/api/gemini/script', {
+    sendJson: (_res, status, payload) => {
+      captured = { status, body: payload }
+    },
+    readBody: async () => body,
+    authorizeWrite: (r: IncomingMessage) => authorizeTaskWrite(r)
+  })
+  return { handled, ...captured }
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === 'string') return input
+  if (input instanceof URL) return input.toString()
+  return input.url
+}
+
+test('POST /api/gemini/script uses Gemini when GEMINI_API_KEY is set (mock fetch)', async () => {
+  process.env.GEMINI_API_KEY = 'test-gemini-key'
+  const realFetch = globalThis.fetch
+  const calls: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = requestUrl(input)
+    calls.push(url)
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { role: 'model', parts: [{ text: JSON.stringify(SCRIPT_JSON) }] } }]
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    )
+  }) as typeof fetch
+  try {
+    const res = await callScript({ prompt: '清晨轻轨上的护士', template_id: 'documentary', duration_s: 12 })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.model, 'gemini-4-hydrogen')
+    assert.equal(res.body.script.title, SCRIPT_JSON.title)
+    assert.match(res.body.script.markdown, /山城早班车/)
+    assert.ok(calls.length >= 1)
+    assert.match(calls[0], /generativelanguage\.googleapis\.com/)
+    assert.equal(calls.some((u) => u.includes('/api/generate')), false)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('POST /api/gemini/script falls back to Ollama JSON mode when no Gemini key (mock fetch)', async () => {
+  const realFetch = globalThis.fetch
+  const seen: Array<{ url: string; body: any }> = []
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push({ url: requestUrl(input), body: JSON.parse(String(init?.body ?? '{}')) })
+    return new Response(JSON.stringify({ response: JSON.stringify(SCRIPT_JSON) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+  }) as typeof fetch
+  try {
+    const res = await callScript({
+      prompt: '清晨轻轨上的护士',
+      template_id: 'documentary',
+      tone: '克制温暖',
+      duration_s: 12
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.model, 'script-test-model')
+    assert.equal(res.body.script.scenes.length, 2)
+    assert.equal(res.body.script.duration_s, 12)
+    assert.match(res.body.script.markdown, /山城早班车/)
+
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].url, 'http://127.0.0.1:11499/api/generate')
+    assert.equal(seen[0].body.model, 'script-test-model')
+    assert.equal(seen[0].body.stream, false)
+    assert.equal(seen[0].body.format, 'json')
+    assert.match(seen[0].body.prompt, /清晨轻轨上的护士/)
+    assert.match(seen[0].body.prompt, /12 秒/)
+    assert.match(seen[0].body.prompt, /克制温暖/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('POST /api/gemini/script returns 503 llm_unavailable when neither Gemini nor Ollama is available', async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async () => {
+    throw new Error('ECONNREFUSED 127.0.0.1:11499')
+  }) as typeof fetch
+  try {
+    const res = await callScript({ prompt: '无人值守的清晨站台', duration_s: 10 })
+    assert.equal(res.status, 503)
+    assert.equal(res.body.error, 'llm_unavailable')
+    assert.match(String(res.body.detail), /Ollama/)
+    assert.equal('script' in res.body, false)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('POST /api/gemini/script rejects a missing prompt with 400', async () => {
+  const res = await callScript({ duration_s: 10 })
+  assert.equal(res.status, 400)
+  assert.match(String(res.body.error), /prompt/)
+})
+
+test('POST /api/gemini/script rejects an invalid X-Web-Token with 401', async () => {
+  process.env.WEB_WRITE_TOKEN = 'script-write-token'
+  const res = await callScript(
+    { prompt: '清晨轻轨' },
+    { host: '127.0.0.1:8088', origin: 'http://evil.example', 'x-web-token': 'wrong' }
+  )
+  assert.equal(res.status, 401)
+  assert.match(String(res.body.error), /X-Web-Token/)
+})
+
+test('POST /api/gemini/script rejects a cross-origin caller without token with 403', async () => {
+  const res = await callScript(
+    { prompt: '清晨轻轨' },
+    { host: '127.0.0.1:8088', origin: 'http://evil.example' }
+  )
+  assert.equal(res.status, 403)
+  assert.match(String(res.body.error), /same-origin|X-Web-Token/)
 })

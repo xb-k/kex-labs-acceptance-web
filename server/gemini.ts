@@ -17,6 +17,9 @@ import { isValidFrameName, isValidSessionId, sanitizeOptimizeParams, type LookPr
 
 const GEMINI_MODEL = 'gemini-4-hydrogen'
 const MAX_RETRIES = 2
+const OLLAMA_DEFAULT_URL = 'http://127.0.0.1:11434'
+const OLLAMA_DEFAULT_TEXT_MODEL = 'qwen2vl:7b-q4'
+const OLLAMA_SCRIPT_TIMEOUT_MS = 60_000
 
 export interface ScriptSceneOutput {
   scene_no: number
@@ -88,6 +91,8 @@ export interface GeminiRouteContext {
   dataRoot?: string
   readJson?: (file: string) => any
   atomicWriteJson?: (file: string, value: unknown) => void
+  /** Injected by api.ts so script writes reuse `authorizeTaskWrite`. */
+  authorizeWrite?: (req: IncomingMessage) => { ok: true } | { ok: false; status: number; error: string }
 }
 
 function createGeminiClient(): GoogleGenAI | null {
@@ -795,6 +800,59 @@ async function verifyHistoricalFactBrief(
   }
 }
 
+function resolveOllamaUrl(): string {
+  return (process.env.OLLAMA_URL?.trim() || OLLAMA_DEFAULT_URL).replace(/\/+$/, '')
+}
+
+function resolveOllamaTextModel(): string {
+  return process.env.OLLAMA_TEXT_MODEL?.trim() || OLLAMA_DEFAULT_TEXT_MODEL
+}
+
+/**
+ * Local-model fallback for script generation when no Gemini key is configured
+ * (or the Gemini call fails). Uses Ollama's JSON mode and parses the structured
+ * script server-side; callers must not fabricate a script when this throws.
+ */
+async function generateScriptWithOllama(prompt: string): Promise<{
+  model: string
+  parsed: Record<string, unknown>
+}> {
+  const url = resolveOllamaUrl()
+  const model = resolveOllamaTextModel()
+  let res: Response
+  try {
+    res = await fetch(`${url}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: false,
+        format: 'json',
+        options: { temperature: 0.4, num_predict: 1800 }
+      }),
+      signal: AbortSignal.timeout(OLLAMA_SCRIPT_TIMEOUT_MS)
+    })
+  } catch (err) {
+    throw new Error(`Ollama unreachable at ${url}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`)
+
+  const body = (await res.json()) as { response?: unknown }
+  const text = String(body.response ?? '').trim()
+  if (!text) throw new Error('Ollama returned an empty response')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('Ollama response is not valid JSON')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Ollama response is not a JSON object')
+  }
+  return { model, parsed: parsed as Record<string, unknown> }
+}
+
 export async function handleGeminiRoute(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1018,6 +1076,16 @@ export async function handleGeminiRoute(
     return true
   }
 
+  const auth = ctx.authorizeWrite?.(req)
+  if (!auth) {
+    ctx.sendJson(res, 403, { error: 'script write authorization is not wired' })
+    return true
+  }
+  if (!auth.ok) {
+    ctx.sendJson(res, auth.status, { error: auth.error })
+    return true
+  }
+
   let body: unknown
   try {
     body = await ctx.readBody(req)
@@ -1108,16 +1176,8 @@ export async function handleGeminiRoute(
       .join('\n')
   }
 
-  const ai = createGeminiClient()
-  if (!ai) {
-    ctx.sendJson(res, 503, {
-      error: 'gemini_unavailable',
-      message: '未检测到服务端 GEMINI_API_KEY 配置，请在 Settings > Secrets 中配置后再调用 AI 生成。'
-    })
-    return true
-  }
-
   const started = Date.now()
+  const ai = createGeminiClient()
   let historicalGrounding: {
     brief: string
     localKbBrief: string
@@ -1130,7 +1190,30 @@ export async function handleGeminiRoute(
     sources: []
   }
   if (useHistoricalGrounding) {
-    historicalGrounding = await verifyHistoricalFactBrief(ai, prompt, storyEra)
+    if (ai) {
+      historicalGrounding = await verifyHistoricalFactBrief(ai, prompt, storyEra)
+    } else {
+      const local = buildLocalHistoricalContext(storyEra, prompt)
+      historicalGrounding = {
+        brief: local.localKbBrief,
+        localKbBrief: local.localKbBrief,
+        matchedEras: local.matchedEras,
+        sources: []
+      }
+    }
+  }
+
+  const normalizeDefaults = {
+    tone,
+    aspect,
+    duration_s,
+    profile,
+    template_id: template.id,
+    template_label: template.label,
+    story_era: storyEra || undefined,
+    episode_mode: episodeMode,
+    historical_context: historicalGrounding.brief || undefined,
+    historical_sources: historicalGrounding.sources
   }
 
   // Director-First Storyboard Compiler prompt adapted from open-source GitHub AI video director specs
@@ -1186,6 +1269,11 @@ export async function handleGeminiRoute(
     ...(previousScriptContext ? ['', '--- 待优化升级的现有剧本 ---', previousScriptContext] : [])
   ].join('\n')
 
+  let geminiError: string | null = null
+
+  // Gemini is preferred when GEMINI_API_KEY is configured; Ollama covers the
+  // no-key case and any Gemini failure below.
+  if (ai) {
   let lastError: unknown = null
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
@@ -1280,18 +1368,7 @@ export async function handleGeminiRoute(
         throw new Error('Gemini 未返回有效剧本文本')
       }
       const parsed = JSON.parse(rawText) as Record<string, unknown>
-      const script = normalizeGeneratedScript(parsed, {
-        tone,
-        aspect,
-        duration_s,
-        profile,
-        template_id: template.id,
-        template_label: template.label,
-        story_era: storyEra || undefined,
-        episode_mode: episodeMode,
-        historical_context: historicalGrounding.brief || undefined,
-        historical_sources: historicalGrounding.sources
-      })
+      const script = normalizeGeneratedScript(parsed, normalizeDefaults)
       ctx.sendJson(res, 200, {
         model: GEMINI_MODEL,
         elapsed_ms: Date.now() - started,
@@ -1309,10 +1386,36 @@ export async function handleGeminiRoute(
   }
 
   const normalized = normalizeGeminiError(lastError)
-  console.error(`[gemini] POST /api/gemini/script -> ${normalized.status} (${normalized.code})`)
-  ctx.sendJson(res, normalized.status, {
-    error: normalized.code,
-    message: normalized.message
-  })
-  return true
+  geminiError = `${normalized.code}: ${normalized.message}`
+  console.error(
+    `[gemini] POST /api/gemini/script -> ${normalized.status} (${normalized.code}); falling back to Ollama`
+  )
+  }
+
+  const scriptPrompt = [
+    systemInstruction,
+    '',
+    userContents,
+    '',
+    '只输出一个 JSON 对象（不要 Markdown 代码块或解释），字段为：',
+    '{"title":string,"logline":string,"tone":string,"style":string,"optimization_notes":string,"story_era":string,"historical_context":string,"duration_s":number,"chapters":[{"chapter_no":number,"title":string,"era_anchor":string,"summary":string,"key_conflict":string}],"scenes":[{"scene_no":number,"timecode":string,"duration_s":number,"shot_type":string,"camera":string,"continuity_anchor":string,"visual":string,"video_prompt":string,"voiceover":string,"audio":string}]}',
+    `请生成 4~6 个分场镜头，单镜 2.5~6.5 秒，总时长贴近 ${duration_s} 秒。`
+  ].join('\n')
+
+  try {
+    const ollama = await generateScriptWithOllama(scriptPrompt)
+    const script = normalizeGeneratedScript(ollama.parsed, normalizeDefaults)
+    ctx.sendJson(res, 200, {
+      model: ollama.model,
+      elapsed_ms: Date.now() - started,
+      script
+    })
+    return true
+  } catch (err) {
+    const ollamaDetail = err instanceof Error ? err.message : String(err)
+    const detail = geminiError ? `gemini: ${geminiError}; ollama: ${ollamaDetail}` : ollamaDetail
+    console.error(`[gemini] POST /api/gemini/script -> 503 llm_unavailable (${detail})`)
+    ctx.sendJson(res, 503, { error: 'llm_unavailable', detail })
+    return true
+  }
 }

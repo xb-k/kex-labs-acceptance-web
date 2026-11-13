@@ -4329,7 +4329,8 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       readBody: readRequestBody,
       dataRoot: DATA_ROOT,
       readJson,
-      atomicWriteJson
+      atomicWriteJson,
+      authorizeWrite: (r) => authorizeTaskWrite(r)
     })
     return
   }
