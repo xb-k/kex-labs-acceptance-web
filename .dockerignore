@@ -3,3 +3,4 @@ dist
 server/serve.mjs
 screenshots
 .DS_Store
+.git
