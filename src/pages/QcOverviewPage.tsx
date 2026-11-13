@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Area,
   CartesianGrid,
@@ -22,6 +22,7 @@ import { FilterChipGroup, ToolButton } from '../components/ui'
 import { Chart, ChevronRight, Pause, Play, Refresh, Shield, Sliders } from '../components/icons'
 import { useInfiniteScrollBatch } from '../hooks'
 import { explainJobSummaryRow } from '../qc-explain'
+import { QcGatePie, QcMetricBars, QcTrendLine } from '../components/QcCharts'
 
 const QC_POLL_MS = 4000
 const PAGE_LIMIT = 15
@@ -217,6 +218,48 @@ function NoiseTrend({
   )
 }
 
+/**
+ * #135 趋势图需要任务时间：/api/qc/summary 不返回时间，逐个读 /api/snapshot
+ * 的 timestamps（finished → updated → started → created）。只读、失败即视为无时间。
+ */
+function useQcJobTimes(jobs: QcSummaryJob[]) {
+  const [times, setTimes] = useState<Record<string, string | null>>({})
+  const key = jobs
+    .map((job) => job.jobId)
+    .sort()
+    .join(',')
+  useEffect(() => {
+    if (!key) {
+      setTimes({})
+      return
+    }
+    const ids = key.split(',')
+    const controller = new AbortController()
+    let alive = true
+    const read = async (id: string) => {
+      try {
+        const res = await fetch(`/api/snapshot?source=b-track&job=${encodeURIComponent(id)}`, {
+          signal: controller.signal
+        })
+        if (!res.ok) return [id, null] as const
+        const body = (await res.json()) as { timestamps?: Record<string, string | null> }
+        const t = body.timestamps ?? {}
+        return [id, t.finished_at ?? t.updated_at ?? t.started_at ?? t.created_at ?? null] as const
+      } catch {
+        return [id, null] as const
+      }
+    }
+    Promise.all(ids.map(read)).then((entries) => {
+      if (alive) setTimes(Object.fromEntries(entries))
+    })
+    return () => {
+      alive = false
+      controller.abort()
+    }
+  }, [key])
+  return times
+}
+
 export function QcOverviewPage() {
   const [liveSync, setLiveSync] = useState(true)
   const { status, data, error, refreshing, updatedAt, retry, refresh } = useLiveJson<QcSummaryResponse>(
@@ -227,6 +270,10 @@ export function QcOverviewPage() {
   const [sortBy, setSortBy] = useState<QcSortKey>('default')
   const [query, setQuery] = useState('')
   const jobs = data?.jobs ?? []
+  const qcJobs = useMemo(() => jobs.filter((job) => job.hasQc), [jobs])
+  const jobTimes = useQcJobTimes(qcJobs)
+  const chartThresholds = data?.thresholds.items ?? []
+  const chartRules = data?.rules ?? []
 
   const kpi = useMemo(() => {
     const inspected = jobs.filter((job) => job.hasQc)
@@ -545,6 +592,44 @@ export function QcOverviewPage() {
             )}
           </div>
         </StatCard>
+      </div>
+
+      <div className="mt-5 grid gap-3 lg:grid-cols-3" data-equal-grid data-stagger data-testid="qc-charts">
+        <section className="card flex h-full min-w-0 flex-col p-4 sm:p-5" aria-labelledby="qc-gate-pie-title">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 id="qc-gate-pie-title" className="text-[15px] font-semibold tracking-tight">
+              门禁结论分布
+            </h2>
+            <span className="num text-[11px] text-apple-subtext">pass / warn / fail</span>
+          </div>
+          <div className="mt-3 flex-1">
+            <QcGatePie jobs={jobs} />
+          </div>
+        </section>
+
+        <section className="card flex h-full min-w-0 flex-col p-4 sm:p-5" aria-labelledby="qc-metric-bars-title">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 id="qc-metric-bars-title" className="text-[15px] font-semibold tracking-tight">
+              分项得分
+            </h2>
+            <span className="num text-[11px] text-apple-subtext">真实字段 · 不补值</span>
+          </div>
+          <div className="mt-3 flex-1">
+            <QcMetricBars jobs={jobs} thresholds={chartThresholds} rules={chartRules} />
+          </div>
+        </section>
+
+        <section className="card flex h-full min-w-0 flex-col p-4 sm:p-5" aria-labelledby="qc-trend-line-title">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 id="qc-trend-line-title" className="text-[15px] font-semibold tracking-tight">
+              通过率趋势
+            </h2>
+            <span className="num text-[11px] text-apple-subtext">近 8 次 · 按任务时间</span>
+          </div>
+          <div className="mt-3 flex-1">
+            <QcTrendLine jobs={jobs} times={jobTimes} />
+          </div>
+        </section>
       </div>
 
       <section className="card mt-5 p-4 sm:p-5" aria-labelledby="qc-rules-title">
