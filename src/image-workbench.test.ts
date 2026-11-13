@@ -4,6 +4,9 @@ import {
   IMAGE_SIZES,
   buildAigcJobPayload,
   buildImageJobPayload,
+  buildJobDeletePlan,
+  canDeleteJob,
+  formatJobDuration,
   galleryMeta,
   galleryPrimaryImage,
   galleryStatusLabel,
@@ -160,6 +163,7 @@ test('gallery 映射：主图 / 状态标签 / 元信息', () => {
     steps: 30,
     denoise: 0.6,
     elapsed_s: 12.34,
+    duration_ms: 12340,
     images: [{ name: 'image-01.png', url: '/api/studio/jobs/imgjob-1/artifacts/image-01.png' }],
     cover_url: '/api/studio/jobs/imgjob-1/artifacts/image-01.png'
   }
@@ -170,10 +174,41 @@ test('gallery 映射：主图 / 状态标签 / 元信息', () => {
   )
   assert.equal(galleryStatusLabel('succeeded'), '已完成')
   assert.equal(galleryStatusLabel('failed'), '失败')
-  assert.equal(galleryMeta(item), 'Edit · 864×1536 · 30 steps · seed 7 · 12.3s')
+  assert.equal(galleryMeta(item), 'Edit · 864×1536 · 30 steps · seed 7')
 
   const failed = galleryMeta({ ...item, mode: null, width: null, height: null, steps: null, seed: null, elapsed_s: null })
   assert.equal(failed, '')
+})
+
+test('#139 耗时展示：<60s 一位小数，≥60s 用 m ss，null 显示「耗时未记录」', () => {
+  assert.equal(formatJobDuration(12340), '耗时 12.3s')
+  assert.equal(formatJobDuration(63000), '耗时 1m 03s')
+  assert.equal(formatJobDuration(60000), '耗时 1m 00s')
+  assert.equal(formatJobDuration(0), '耗时 0.0s')
+  assert.equal(formatJobDuration(null), '耗时未记录')
+  assert.equal(formatJobDuration(undefined), '耗时未记录')
+})
+
+test('#140 删除入口：仅 failed / canceled 可删', () => {
+  assert.equal(canDeleteJob('failed'), true)
+  assert.equal(canDeleteJob('canceled'), true)
+  for (const status of ['queued', 'running', 'succeeded'] as const) {
+    assert.equal(canDeleteJob(status), false)
+    assert.equal(buildJobDeletePlan({ id: 'job-1', status }), null)
+  }
+})
+
+test('#140 删除请求与确认文案：URL 编码 id，文案含 id 与状态', () => {
+  const plan = buildJobDeletePlan({ id: 'web-20261113082701-b01b92', status: 'failed' })
+  assert.ok(plan)
+  assert.equal(plan.url, '/api/studio/jobs/web-20261113082701-b01b92')
+  assert.match(plan.description, /web-20261113082701-b01b92/)
+  assert.match(plan.description, /失败/)
+
+  const canceled = buildJobDeletePlan({ id: 'job 1/2', status: 'canceled' })
+  assert.ok(canceled)
+  assert.equal(canceled.url, '/api/studio/jobs/job%201%2F2')
+  assert.match(canceled.description, /已取消/)
 })
 
 test('封面 / 关键帧按钮 enable 条件：先选中图片', () => {

@@ -1054,6 +1054,8 @@ export type StudioGalleryItem = {
   steps: number | null
   denoise: number | null
   elapsed_s: number | null
+  /** #139 真实耗时（ms）；intake/state 与时间戳都推不出时为 null，展示「耗时未记录」。 */
+  duration_ms: number | null
   /** `url` 恒为 `/api/studio/jobs/:id/artifacts/:name`。 */
   images: Array<{ name: string; url: string }>
   cover_url: string | null

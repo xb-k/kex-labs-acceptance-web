@@ -234,6 +234,35 @@ export function galleryStatusLabel(status: StudioJobStatus): string {
   return STATUS_LABEL[status] ?? status
 }
 
+/**
+ * #139 真实耗时展示：`duration_ms` 为 null 时不估算，直接给「耗时未记录」。
+ * <60s 保留一位小数（12.3s），≥60s 用 `1m 03s`；负值 / 非有限值按未记录处理。
+ */
+export function formatJobDuration(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '耗时未记录'
+  const totalSeconds = Math.round(ms / 1000)
+  if (totalSeconds < 60) return `耗时 ${(ms / 1000).toFixed(1)}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `耗时 ${minutes}m ${String(seconds).padStart(2, '0')}s`
+}
+
+/** #140 只有 failed / canceled 的 job 可删；其余状态不显示删除入口。 */
+export function canDeleteJob(status: StudioJobStatus): boolean {
+  return status === 'failed' || status === 'canceled'
+}
+
+export type JobDeletePlan = { url: string; description: string }
+
+/** #140 删除请求与二次确认文案（含 job id / 状态），组件与测试共用同一口径。 */
+export function buildJobDeletePlan(job: { id: string; status: StudioJobStatus }): JobDeletePlan | null {
+  if (!canDeleteJob(job.status)) return null
+  return {
+    url: `/api/studio/jobs/${encodeURIComponent(job.id)}`,
+    description: `删除任务 ${job.id}（${galleryStatusLabel(job.status)}）？会同时移除它的产物与元数据，无法恢复。`
+  }
+}
+
 /** gallery 卡片的缩略图 / 大图统一取代理 URL（后端保证是 /api/studio/... 同源路径）。 */
 export function galleryPrimaryImage(item: StudioGalleryItem): { name: string; url: string } | null {
   return item.images.length > 0 ? item.images[0] : null
@@ -245,6 +274,6 @@ export function galleryMeta(item: StudioGalleryItem): string {
   if (item.width && item.height) parts.push(`${item.width}×${item.height}`)
   if (item.steps != null) parts.push(`${item.steps} steps`)
   if (item.seed != null) parts.push(`seed ${item.seed}`)
-  if (item.elapsed_s != null) parts.push(`${item.elapsed_s.toFixed(1)}s`)
+  // #139 耗时由 formatJobDuration 单独展示，这里不再重复。
   return parts.join(' · ')
 }

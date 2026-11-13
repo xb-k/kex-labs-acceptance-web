@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { getJson, HttpError, postJson, useLiveJson } from '../api'
+import { deleteJson, getJson, HttpError, postJson, useLiveJson } from '../api'
 import type {
   StudioAssetRef,
   StudioGalleryItem,
@@ -11,7 +11,9 @@ import type {
 } from '../types'
 import { Field, inputClass, primaryButton, quietButton } from './studio-ui'
 import { StudioStatusChip } from './StudioStatusChip'
-import { useInfiniteScrollBatch } from '../hooks'
+import { ToastHost } from './ui'
+import { Trash } from './icons'
+import { useInfiniteScrollBatch, useToast } from '../hooks'
 import {
   DEFAULT_EDIT_DENOISE,
   DEFAULT_IMAGE_SIZE,
@@ -20,6 +22,9 @@ import {
   IMAGE_SIZES,
   T2I_DENOISE,
   buildImageJobPayload,
+  buildJobDeletePlan,
+  canDeleteJob,
+  formatJobDuration,
   galleryMeta,
   galleryPrimaryImage,
   galleryStatusLabel,
@@ -58,11 +63,6 @@ function requestErrorText(err: unknown): string {
     return reason ? `${code}（reason: ${reason}）` : `${err.message === code ? '' : `${err.message} · `}${code}`
   }
   return errorText(err)
-}
-
-function formatElapsed(value: number | null): string {
-  if (value == null) return '—'
-  return `${value.toFixed(1)}s`
 }
 
 /** 提交后的 4s 轮询：状态以 studio 为准，终态即停，不伪造成功。 */
@@ -144,13 +144,17 @@ function ImageJobTracker({ jobId }: { jobId: string }) {
 function GalleryCard({
   item,
   selected,
+  deleting,
   onSelect,
-  onPreview
+  onPreview,
+  onDelete
 }: {
   item: StudioGalleryItem
   selected: boolean
+  deleting: boolean
   onSelect: (image: SelectedImage) => void
   onPreview: (image: SelectedImage) => void
+  onDelete: (item: StudioGalleryItem) => void
 }) {
   const primary = galleryPrimaryImage(item)
   return (
@@ -187,7 +191,9 @@ function GalleryCard({
       <div className="space-y-1.5 px-3 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-1.5">
           <StudioStatusChip status={item.status} />
-          <span className="num text-[10px] text-apple-subtext">{formatElapsed(item.elapsed_s)}</span>
+          <span className="num text-[10px] text-apple-subtext" data-testid="image-duration">
+            {formatJobDuration(item.duration_ms)}
+          </span>
         </div>
         <p className="line-clamp-2 break-words text-[12px] leading-relaxed" title={item.prompt ?? ''}>
           {item.prompt ?? '（无 prompt 记录）'}
@@ -203,6 +209,28 @@ function GalleryCard({
         )}
         {item.cover_url && (
           <p className="text-[10px] text-[#1E7A3C]">已设为封面 · cover_asset 可回读</p>
+        )}
+        {canDeleteJob(item.status) && (
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => onDelete(item)}
+              disabled={deleting}
+              aria-label={`删除任务 ${item.id}（${galleryStatusLabel(item.status)}）`}
+              title="删除任务（失败 / 已取消）"
+              data-testid="image-delete"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-black/[0.08] bg-white text-apple-subtext transition-colors hover:border-[#E7B4AE] hover:text-[#B3261E] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/45 disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              {deleting ? (
+                <span
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-black/15 border-t-[#B3261E]"
+                />
+              ) : (
+                <Trash className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </div>
         )}
         {primary && (
           <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
@@ -266,6 +294,11 @@ export function ImageWorkbench({
   const [coverError, setCoverError] = useState<string | null>(null)
   const [coverResult, setCoverResult] = useState<CoverResponse | null>(null)
   const [keyframeNote, setKeyframeNote] = useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<StudioGalleryItem | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(() => new Set())
+  const { toast, showToast, clearToast } = useToast(4000)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const galleryUrl = useMemo(() => {
@@ -273,7 +306,8 @@ export function ImageWorkbench({
     return `/api/studio/gallery?limit=50${filter ? `&job=${encodeURIComponent(filter)}` : ''}`
   }, [galleryJob])
   const gallery = useLiveJson<GalleryResponse>(galleryUrl, 4000)
-  const items = gallery.data?.items ?? []
+  // 删除成功后立即从列表移除；后端下一轮刷新返回的旧快照也被 removedIds 过滤。
+  const items = (gallery.data?.items ?? []).filter((item) => !removedIds.has(item.id))
   const galleryBatch = useInfiniteScrollBatch(items.length, 9, 9, galleryJob)
   const pagedItems = items.slice(0, galleryBatch.visibleCount)
 
@@ -290,6 +324,18 @@ export function ImageWorkbench({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [lightbox])
+
+  useEffect(() => {
+    if (!pendingDelete) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && deletingId === null) {
+        setPendingDelete(null)
+        setDeleteError(null)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [pendingDelete, deletingId])
 
   function switchMode(next: StudioImageMode) {
     setMode(next)
@@ -384,6 +430,35 @@ export function ImageWorkbench({
   }, [])
   const handlePreview = useCallback((image: SelectedImage) => setLightbox(image), [])
 
+  /** #140 删除入口只对 failed / canceled 渲染；点开后先弹二次确认。 */
+  function requestDelete(item: StudioGalleryItem) {
+    if (deletingId !== null) return
+    setPendingDelete(item)
+    setDeleteError(null)
+  }
+
+  async function confirmDelete() {
+    const plan = pendingDelete ? buildJobDeletePlan(pendingDelete) : null
+    if (!plan || !pendingDelete) return
+    const id = pendingDelete.id
+    setDeletingId(id)
+    setDeleteError(null)
+    try {
+      await deleteJson<{ deleted: boolean; id: string }>(plan.url)
+      setRemovedIds((prev) => new Set([...prev, id]))
+      if (selected?.item.id === id) setSelected(null)
+      if (lightbox?.item.id === id) setLightbox(null)
+      setPendingDelete(null)
+      showToast(`已删除任务 ${id}`)
+      gallery.refresh()
+    } catch (err) {
+      // 失败保留确认框，直接展示后端 error / reason，不吞错。
+      setDeleteError(requestErrorText(err))
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   async function handleSetCover() {
     if (!selected) {
       setCoverError('请先在 gallery 里点选一张图。')
@@ -423,6 +498,7 @@ export function ImageWorkbench({
   const sizeDisabled = uploading || submitting
   const actionState = imageActionState({ hasSelection: selected !== null, coverBusy })
   const referenceState = referencePanelState({ mode, uploadId: sourceUploadId, uploading })
+  const deletePlan = pendingDelete ? buildJobDeletePlan(pendingDelete) : null
 
   return (
     <section id="studio-image" className="card min-w-0 scroll-mt-6" aria-labelledby="studio-image-title">
@@ -756,8 +832,10 @@ export function ImageWorkbench({
                     key={item.id}
                     item={item}
                     selected={selected?.item.id === item.id && selected.image.name === galleryPrimaryImage(item)?.name}
+                    deleting={deletingId === item.id}
                     onSelect={handleSelect}
                     onPreview={handlePreview}
+                    onDelete={requestDelete}
                   />
                 ))}
               </ul>
@@ -914,7 +992,7 @@ export function ImageWorkbench({
                 <p className="line-clamp-2 break-words text-[12px] leading-relaxed">{lightbox.item.prompt ?? '（无 prompt）'}</p>
                 <p className="num mt-0.5 break-all text-[10px] text-apple-subtext">
                   {lightbox.item.id} / {lightbox.image.name} · {galleryStatusLabel(lightbox.item.status)} ·{' '}
-                  {formatElapsed(lightbox.item.elapsed_s)}
+                  {formatJobDuration(lightbox.item.duration_ms)}
                 </p>
               </div>
               <button
@@ -931,6 +1009,78 @@ export function ImageWorkbench({
           </div>
         </div>
       )}
+
+      {pendingDelete && deletePlan && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-apple-text/30 p-4 backdrop-blur-[2px]"
+          role="presentation"
+          onClick={() => {
+            if (deletingId === null) {
+              setPendingDelete(null)
+              setDeleteError(null)
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="image-delete-title"
+            data-testid="image-delete-dialog"
+            className="w-full max-w-[420px] rounded-[16px] border border-black/[0.08] bg-white p-5 shadow-lift"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 id="image-delete-title" className="text-[14px] font-semibold text-apple-text">
+              删除任务
+            </h3>
+            <p className="mt-2 break-words text-[12px] leading-relaxed text-apple-subtext">{deletePlan.description}</p>
+            {deleteError && (
+              <p
+                role="alert"
+                data-testid="image-delete-error"
+                className="mt-3 break-words rounded-lg bg-[#FCEDEB] px-3 py-2 text-[11px] leading-relaxed text-[#B3261E] ring-1 ring-inset ring-[#F3D3CF]"
+              >
+                {deleteError}
+              </p>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                autoFocus
+                type="button"
+                onClick={() => {
+                  setPendingDelete(null)
+                  setDeleteError(null)
+                }}
+                disabled={deletingId !== null}
+                data-testid="image-delete-cancel"
+                className={`${quietButton} h-9 px-3.5 text-[12px]`}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDelete()}
+                disabled={deletingId !== null}
+                data-testid="image-delete-confirm"
+                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-[#B3261E] px-3.5 text-[12px] font-medium text-white transition-colors hover:bg-[#951F18] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/45 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deletingId !== null ? (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className="h-3 w-3 animate-spin rounded-full border-2 border-white/35 border-t-white"
+                    />
+                    删除中…
+                  </>
+                ) : (
+                  '删除'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ToastHost toast={toast} onClose={clearToast} testId="image-toast" />
     </section>
   )
 }
