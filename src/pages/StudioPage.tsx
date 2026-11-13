@@ -642,7 +642,8 @@ export function StudioPage() {
             onNotify={(msg) => showToast(msg, 'ok')}
           />
 
-          <div className="grid gap-5 xl:grid-cols-[minmax(340px,420px)_minmax(0,1fr)] xl:items-start">
+          {/* A 轨为上下分段：剧本 → 制片入队 → 图片工作台，不再左右并排 */}
+          <div className="space-y-6">
             <form
               onSubmit={handleSubmit}
               className="card p-5"

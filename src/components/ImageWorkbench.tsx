@@ -194,7 +194,10 @@ function GalleryCard({
         </p>
         <p className="num break-all text-[10px] text-apple-subtext">{galleryMeta(item)}</p>
         {item.status === 'failed' && item.error && (
-          <p className="break-words rounded-[8px] bg-[#FCEDEB] px-2 py-1 text-[10px] leading-relaxed text-[#B3261E]">
+          <p
+            className="line-clamp-3 break-words rounded-[8px] bg-[#FCEDEB] px-2 py-1 text-[10px] leading-relaxed text-[#B3261E]"
+            title={item.error}
+          >
             {item.error}
           </p>
         )}
@@ -435,7 +438,7 @@ export function ImageWorkbench({
         <span className="num rounded-md bg-apple-bg px-2.5 py-1 text-[11px] text-apple-subtext">type=image</span>
       </div>
 
-      <div className="grid gap-5 p-4 xl:grid-cols-[minmax(300px,360px)_minmax(0,1fr)] xl:items-start">
+      <div className="grid gap-5 p-4 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)] lg:items-start">
         <form onSubmit={handleSubmit} className="space-y-3.5" aria-describedby="image-form-hint">
           <fieldset>
             <legend className="text-[13px] font-medium text-apple-text">模式</legend>
@@ -743,7 +746,10 @@ export function ImageWorkbench({
           )}
 
           {items.length > 0 && (
-            <>
+            <div
+              className="max-h-[min(60vh,520px)] space-y-2.5 overflow-y-auto overscroll-contain pr-1.5"
+              data-testid="image-gallery-scroll"
+            >
               <ul className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-3" aria-label="图片任务 gallery">
                 {pagedItems.map((item) => (
                   <GalleryCard
@@ -774,7 +780,7 @@ export function ImageWorkbench({
                   </button>
                 )}
               </div>
-            </>
+            </div>
           )}
 
           <div className="rounded-[12px] border border-black/[0.06] bg-apple-bg/40 p-3">
