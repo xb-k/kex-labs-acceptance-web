@@ -28,6 +28,7 @@ import {
   formatJobDuration,
   galleryMeta,
   IMAGE_WAIT_STAGES,
+  imageCancelHint,
   imageJobDurationMs,
   imageWaitStage,
   galleryPrimaryImage,
@@ -70,17 +71,20 @@ function requestErrorText(err: unknown): string {
 }
 
 /** 提交后的 4s 轮询：状态以 studio 为准，终态即停，不伪造成功。 */
-function ImageJobTracker({
+export function ImageJobTracker({
   jobId,
   startedAt,
-  durationMs
+  durationMs,
+  initialJob = null
 }: {
   jobId: string
   startedAt: number | null
   /** gallery 里的后端真实耗时（job 详情接口不返回；未就绪时为 undefined）。 */
   durationMs?: number | null
+  /** 测试 / 首帧渲染用的已知 job；浏览器里由轮询覆盖。 */
+  initialJob?: StudioJob | null
 }) {
-  const [job, setJob] = useState<StudioJob | null>(null)
+  const [job, setJob] = useState<StudioJob | null>(initialJob)
   const [error, setError] = useState<string | null>(null)
   const [settled, setSettled] = useState(false)
   const [finishedAt, setFinishedAt] = useState<number | null>(null)
@@ -161,6 +165,7 @@ function ImageJobTracker({
     settled && finishedAt != null && startedAt != null ? finishedAt - startedAt : undefined
   const finalElapsedMs = settled ? imageJobDurationMs(durationMs, measuredElapsedMs) : undefined
   const canCancel = canCancelImageJob(job?.status)
+  const cancelHint = imageCancelHint(job?.status)
 
   return (
     <div
@@ -189,6 +194,15 @@ function ImageJobTracker({
         error={failed ? job?.error ?? '生成失败（studio 未返回 error）' : null}
         onCancel={!settled && canCancel && !cancelling ? () => void handleCancel() : undefined}
       />
+      {cancelHint && !settled && !cancelling && (
+        <p
+          className="mt-1.5 break-words text-[11px] leading-relaxed text-apple-subtext"
+          data-testid="image-cancel-hint"
+          title={cancelHint}
+        >
+          {cancelHint}
+        </p>
+      )}
       {cancelError && (
         <p className="mt-1.5 break-words text-[11px] leading-relaxed text-[#B3261E]" role="alert">
           取消失败：{cancelError}

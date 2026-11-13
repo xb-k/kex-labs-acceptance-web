@@ -271,9 +271,17 @@ export function imageJobDurationMs(
   return undefined
 }
 
-/** #136 只有 queued / running 的图片 job 显示取消；终态或未知状态不渲染取消，避免假取消。 */
+/**
+ * #149 只有 queued 的图片 job 显示取消：studio intake 只允许 `queued → canceled`，
+ * running 取消必 409，因此 running 不再渲染取消入口（改为 imageCancelHint 说明）。
+ */
 export function canCancelImageJob(status: StudioJobStatus | null | undefined): boolean {
-  return status === 'queued' || status === 'running'
+  return status === 'queued'
+}
+
+/** #149 running 态不可取消的说明文案；其他状态无需提示。 */
+export function imageCancelHint(status: StudioJobStatus | null | undefined): string | null {
+  return status === 'running' ? '生成中不可取消' : null
 }
 
 /**

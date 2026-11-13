@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { ImageJobTracker } from './components/ImageWorkbench'
 import {
   IMAGE_SIZES,
   buildAigcJobPayload,
@@ -10,6 +13,7 @@ import {
   formatJobDuration,
   galleryMeta,
   IMAGE_WAIT_STAGES,
+  imageCancelHint,
   imageJobDurationMs,
   imageWaitStage,
   galleryPrimaryImage,
@@ -19,7 +23,7 @@ import {
   validateCoverTarget,
   validateImageForm
 } from './image-workbench'
-import type { StudioGalleryItem } from './types'
+import type { StudioGalleryItem, StudioJob, StudioJobStatus } from './types'
 
 const BASE = {
   mode: 't2i' as const,
@@ -233,11 +237,79 @@ test('#136 完成耗时：后端 duration_ms 优先，缺失回退本地墙钟�
   assert.equal(imageJobDurationMs(Number.NaN, -1), undefined)
 })
 
-test('#136 取消入口：仅 queued / running 显示，终态不假取消', () => {
+/** #149 SSR 渲染用：只需 status / error 的图片 job 假数据。 */
+function imageJob(status: StudioJobStatus): StudioJob {
+  return {
+    id: 'web-149-test',
+    type: 'image',
+    rail: 'A',
+    status,
+    brief_id: null,
+    created_at: '2026-11-14T00:00:00Z',
+    updated_at: '2026-11-14T00:00:00Z',
+    error: status === 'failed' ? '模型显存不足' : null,
+    stage: null,
+    plan_id: null,
+    model: null,
+    inputs: [],
+    outputs: [],
+    assets: [],
+    qc: { status: 'pending', report_id: null },
+    cost: { gpu_seconds: null, credits: null },
+    created_by: 'web',
+    events: [],
+    progress: { stage: null, stages: {} }
+  }
+}
+
+test('#149 取消入口：仅 queued 显示，running/终态不假取消', () => {
   assert.equal(canCancelImageJob('queued'), true)
-  assert.equal(canCancelImageJob('running'), true)
+  assert.equal(canCancelImageJob('running'), false)
   for (const status of ['succeeded', 'failed', 'canceled', null, undefined] as const) {
     assert.equal(canCancelImageJob(status), false)
+  }
+})
+
+test('#149 running 态给出「生成中不可取消」说明，其他状态无提示', () => {
+  assert.equal(imageCancelHint('running'), '生成中不可取消')
+  for (const status of ['queued', 'succeeded', 'failed', 'canceled', null, undefined] as const) {
+    assert.equal(imageCancelHint(status), null)
+  }
+})
+
+test('#149 UI 渲染：queued 有取消按钮，running 无取消且有说明', () => {
+  const queuedHtml = renderToStaticMarkup(
+    createElement(ImageJobTracker, {
+      jobId: 'web-149-test',
+      startedAt: 1_000_000,
+      initialJob: imageJob('queued')
+    })
+  )
+  assert.match(queuedHtml, /data-testid="async-cancel"/)
+  assert.match(queuedHtml, /已入队，等待 GPU 排队/)
+  assert.doesNotMatch(queuedHtml, /data-testid="image-cancel-hint"/)
+
+  const runningHtml = renderToStaticMarkup(
+    createElement(ImageJobTracker, {
+      jobId: 'web-149-test',
+      startedAt: 1_000_000,
+      initialJob: imageJob('running')
+    })
+  )
+  assert.doesNotMatch(runningHtml, /data-testid="async-cancel"/)
+  assert.match(runningHtml, /data-testid="image-cancel-hint"/)
+  assert.match(runningHtml, /生成中不可取消/)
+
+  for (const status of ['succeeded', 'failed', 'canceled'] as const) {
+    const html = renderToStaticMarkup(
+      createElement(ImageJobTracker, {
+        jobId: 'web-149-test',
+        startedAt: 1_000_000,
+        initialJob: imageJob(status)
+      })
+    )
+    assert.doesNotMatch(html, /data-testid="async-cancel"/)
+    assert.doesNotMatch(html, /data-testid="image-cancel-hint"/)
   }
 })
 
