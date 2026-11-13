@@ -5,10 +5,12 @@ import {
   buildAigcJobPayload,
   buildImageJobPayload,
   buildJobDeletePlan,
+  canCancelImageJob,
   canDeleteJob,
   formatJobDuration,
   galleryMeta,
   IMAGE_WAIT_STAGES,
+  imageJobDurationMs,
   imageWaitStage,
   galleryPrimaryImage,
   galleryStatusLabel,
@@ -221,6 +223,22 @@ test('#136 图片等待阶段：提交 → 排队 → 生成 → 完成，失败
   assert.deepEqual(imageWaitStage('succeeded'), { stage: 3, label: '图片生成完成' })
   assert.deepEqual(imageWaitStage('failed'), { stage: 2, label: '图片生成失败' })
   assert.deepEqual(imageWaitStage('canceled'), { stage: 2, label: '图片任务已取消' })
+})
+
+test('#136 完成耗时：后端 duration_ms 优先，缺失回退本地墙钟，非法值不展示', () => {
+  assert.equal(imageJobDurationMs(12340, 20000), 12340)
+  assert.equal(imageJobDurationMs(null, 20000), 20000)
+  assert.equal(imageJobDurationMs(undefined, 0), 0)
+  assert.equal(imageJobDurationMs(null, null), undefined)
+  assert.equal(imageJobDurationMs(Number.NaN, -1), undefined)
+})
+
+test('#136 取消入口：仅 queued / running 显示，终态不假取消', () => {
+  assert.equal(canCancelImageJob('queued'), true)
+  assert.equal(canCancelImageJob('running'), true)
+  for (const status of ['succeeded', 'failed', 'canceled', null, undefined] as const) {
+    assert.equal(canCancelImageJob(status), false)
+  }
 })
 
 test('封面 / 关键帧按钮 enable 条件：先选中图片', () => {

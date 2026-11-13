@@ -12,6 +12,7 @@ import { elapsedMilliseconds, formatElapsed, useElapsed } from './hooks'
 import { AsyncStatusLine } from './components/ui'
 import { isAbortError, postJson } from './api'
 import { importAgent } from './agents'
+import { IMAGE_WAIT_STAGES, imageWaitStage } from './image-workbench'
 
 function ElapsedProbe({ startedAt }: { startedAt: number }) {
   return createElement('span', { 'data-testid': 'elapsed-probe' }, formatElapsed(useElapsed(startedAt)))
@@ -91,6 +92,27 @@ test('AsyncStatusLine：错误态显示后端文案 + 重试，不吞 llm_unavai
   assert.match(html, /llm_unavailable/)
   assert.match(html, /data-testid="async-retry"/)
   assert.match(html, /aria-busy="false"/)
+  assert.doesNotMatch(html, /data-testid="async-cancel"/)
+})
+
+test('#136 图片等待失败态：渲染后端 error，不显示取消', () => {
+  const failed = imageWaitStage('failed')
+  const html = renderToStaticMarkup(
+    createElement(AsyncStatusLine, {
+      testId: 'image-wait-status',
+      label: failed.label,
+      startedAt: null,
+      stages: IMAGE_WAIT_STAGES,
+      stage: failed.stage,
+      active: false,
+      error: 'intake 返回 500',
+      onCancel: () => {}
+    })
+  )
+  assert.match(html, /图片生成失败/)
+  assert.match(html, /第 3\/4 步：模型生成/)
+  assert.match(html, /intake 返回 500/)
+  assert.match(html, /role="alert"/)
   assert.doesNotMatch(html, /data-testid="async-cancel"/)
 })
 

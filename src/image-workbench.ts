@@ -260,6 +260,22 @@ export function imageWaitStage(status: StudioJobStatus | null | undefined): Imag
   }
 }
 
+/** #136 图片 job 终态耗时：后端 `duration_ms` 优先，缺失时回退本地测得的墙钟；都不合法则不展示。 */
+export function imageJobDurationMs(
+  jobDurationMs: number | null | undefined,
+  measuredMs: number | null | undefined
+): number | undefined {
+  for (const value of [jobDurationMs, measuredMs]) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
+  }
+  return undefined
+}
+
+/** #136 只有 queued / running 的图片 job 显示取消；终态或未知状态不渲染取消，避免假取消。 */
+export function canCancelImageJob(status: StudioJobStatus | null | undefined): boolean {
+  return status === 'queued' || status === 'running'
+}
+
 /**
  * #139 真实耗时展示：`duration_ms` 为 null 时不估算，直接给「耗时未记录」。
  * <60s 保留一位小数（12.3s），≥60s 用 `1m 03s`；负值 / 非有限值按未记录处理。

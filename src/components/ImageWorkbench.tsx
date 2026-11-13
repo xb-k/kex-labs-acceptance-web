@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { deleteJson, getJson, HttpError, postJson, useLiveJson } from '../api'
+import { deleteJson, getJson, HttpError, isAbortError, postJson, useLiveJson } from '../api'
 import type {
   StudioAssetRef,
   StudioGalleryItem,
@@ -23,10 +23,12 @@ import {
   T2I_DENOISE,
   buildImageJobPayload,
   buildJobDeletePlan,
+  canCancelImageJob,
   canDeleteJob,
   formatJobDuration,
   galleryMeta,
   IMAGE_WAIT_STAGES,
+  imageJobDurationMs,
   imageWaitStage,
   galleryPrimaryImage,
   galleryStatusLabel,
@@ -68,30 +70,50 @@ function requestErrorText(err: unknown): string {
 }
 
 /** 提交后的 4s 轮询：状态以 studio 为准，终态即停，不伪造成功。 */
-function ImageJobTracker({ jobId, startedAt }: { jobId: string; startedAt: number | null }) {
+function ImageJobTracker({
+  jobId,
+  startedAt,
+  durationMs
+}: {
+  jobId: string
+  startedAt: number | null
+  /** gallery 里的后端真实耗时（job 详情接口不返回；未就绪时为 undefined）。 */
+  durationMs?: number | null
+}) {
   const [job, setJob] = useState<StudioJob | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [settled, setSettled] = useState(false)
   const [finishedAt, setFinishedAt] = useState<number | null>(null)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+  const reloadRef = useRef<() => Promise<void>>(async () => {})
 
   useEffect(() => {
     let alive = true
     let timer: number | null = null
+    let inFlight: AbortController | null = null
     setJob(null)
     setError(null)
     setSettled(false)
     setFinishedAt(null)
+    setCancelling(false)
+    setCancelError(null)
 
     const stop = () => {
       if (timer !== null) {
         window.clearInterval(timer)
         timer = null
       }
+      inFlight?.abort()
+      inFlight = null
     }
 
     const load = async () => {
+      inFlight?.abort()
+      const ac = new AbortController()
+      inFlight = ac
       try {
-        const next = await getJson<StudioJob>(`/api/studio/jobs/${encodeURIComponent(jobId)}`)
+        const next = await getJson<StudioJob>(`/api/studio/jobs/${encodeURIComponent(jobId)}`, ac.signal)
         if (!alive) return
         setJob(next)
         setError(null)
@@ -101,11 +123,12 @@ function ImageJobTracker({ jobId, startedAt }: { jobId: string; startedAt: numbe
           stop()
         }
       } catch (err) {
-        if (!alive) return
+        if (!alive || isAbortError(err)) return
         setError(errorText(err))
       }
     }
 
+    reloadRef.current = load
     void load()
     timer = window.setInterval(() => void load(), 4000)
     return () => {
@@ -114,10 +137,30 @@ function ImageJobTracker({ jobId, startedAt }: { jobId: string; startedAt: numbe
     }
   }, [jobId])
 
+  /** 取消走 studio 的 POST /jobs/:id/cancel；成功后重新拉一次真实状态，不做本地假取消。 */
+  async function handleCancel() {
+    if (cancelling) return
+    setCancelling(true)
+    setCancelError(null)
+    try {
+      await postJson<{ id?: string; status?: string }>(
+        `/api/studio/jobs/${encodeURIComponent(jobId)}/cancel`,
+        {}
+      )
+      await reloadRef.current()
+    } catch (err) {
+      setCancelError(requestErrorText(err))
+    } finally {
+      setCancelling(false)
+    }
+  }
+
   const wait = imageWaitStage(job?.status)
   const failed = job?.status === 'failed'
-  const finalElapsedMs =
+  const measuredElapsedMs =
     settled && finishedAt != null && startedAt != null ? finishedAt - startedAt : undefined
+  const finalElapsedMs = settled ? imageJobDurationMs(durationMs, measuredElapsedMs) : undefined
+  const canCancel = canCancelImageJob(job?.status)
 
   return (
     <div
@@ -136,7 +179,7 @@ function ImageJobTracker({ jobId, startedAt }: { jobId: string; startedAt: numbe
       <AsyncStatusLine
         className="mt-2"
         testId="image-wait-status"
-        label={wait.label}
+        label={cancelling ? '正在取消图片任务…' : wait.label}
         startedAt={settled ? null : startedAt}
         elapsedMs={finalElapsedMs}
         stages={IMAGE_WAIT_STAGES}
@@ -144,7 +187,13 @@ function ImageJobTracker({ jobId, startedAt }: { jobId: string; startedAt: numbe
         active={!settled}
         detail={settled ? undefined : '每 4 秒刷新，状态与失败原因以 studio 为准'}
         error={failed ? job?.error ?? '生成失败（studio 未返回 error）' : null}
+        onCancel={!settled && canCancel && !cancelling ? () => void handleCancel() : undefined}
       />
+      {cancelError && (
+        <p className="mt-1.5 break-words text-[11px] leading-relaxed text-[#B3261E]" role="alert">
+          取消失败：{cancelError}
+        </p>
+      )}
       {error && (
         <p className="mt-1.5 break-words text-[11px] leading-relaxed text-[#B3261E]" role="alert">
           轮询失败：{error}
@@ -779,7 +828,13 @@ export function ImageWorkbench({
             同源写 <span className="num">/api/studio/jobs</span>；生成失败时展示 studio 返回的 reason，不伪造成功。
           </p>
 
-          {activeJobId && <ImageJobTracker jobId={activeJobId} startedAt={submitStartedAt} />}
+          {activeJobId && (
+            <ImageJobTracker
+              jobId={activeJobId}
+              startedAt={submitStartedAt}
+              durationMs={items.find((item) => item.id === activeJobId)?.duration_ms}
+            />
+          )}
         </form>
 
         <div className="min-w-0 space-y-3">
