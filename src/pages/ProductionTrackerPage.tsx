@@ -110,8 +110,8 @@ export function ProductionTrackerPage() {
 
   const deliveries = deliveriesRes.data?.deliveries ?? []
   const activeRenderingJobs = useMemo(
-    () => enrichAndFilterJobs(jobs, deliveries, '', 'rendering', job?.id, job?.stage),
-    [jobs, deliveries, job?.id, job?.stage]
+    () => enrichAndFilterJobs(jobs, deliveries, '', 'active'),
+    [jobs, deliveries]
   )
 
   useEffect(() => {
@@ -301,7 +301,6 @@ export function ProductionTrackerPage() {
             jobs={jobs}
             deliveries={deliveries}
             selectedJobId={job?.id ?? selectedJobId}
-            currentJobStage={job?.stage ?? null}
             activeOnly
             onSelectJob={(jobId) => {
               setSelectedJobId(jobId)

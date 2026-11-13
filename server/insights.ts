@@ -140,11 +140,116 @@ function listFiles(dir: string): string[] {
 // /api/flow
 // ---------------------------------------------------------------------------
 
-type JobSummary = { id: string; updated_at: string; size: number }
+export type FlowJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'unknown'
+export type FlowJobStatusSource = 'state' | 'intake' | 'unknown'
 
-function listJobs(root: string): JobSummary[] {
+export type FlowJobSummary = {
+  id: string
+  updated_at: string
+  size: number
+  status: FlowJobStatus
+  status_source: FlowJobStatusSource
+  stale: boolean
+}
+
+/** Job index as returned by the studio intake (`GET /intake/jobs`). */
+type JobSummary = FlowJobSummary
+
+/** Normalise every status vocabulary we accept; unknown strings stay unknown. */
+export function normalizeJobStatus(raw: unknown): FlowJobStatus | null {
+  if (typeof raw !== 'string') return null
+  switch (raw.trim().toLowerCase()) {
+    case 'queued':
+    case 'pending':
+      return 'queued'
+    case 'running':
+    case 'processing':
+      return 'running'
+    case 'succeeded':
+    case 'success':
+      return 'succeeded'
+    case 'failed':
+    case 'rejected':
+    case 'error':
+      return 'failed'
+    case 'canceled':
+    case 'cancelled':
+      return 'canceled'
+    default:
+      return null
+  }
+}
+
+/** `WEB_STALE_AFTER_MS` overrides the 30-minute default; bad values keep the default. */
+export function staleAfterMs(): number {
+  const raw = process.env.WEB_STALE_AFTER_MS
+  const parsed = raw ? Number(raw) : NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000
+}
+
+export function parseJobTime(value: unknown): number | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? null : parsed
+}
+
+/**
+ * Resolve one job's runtime status without inventing anything:
+ * `state.status` wins, then the intake record, otherwise `unknown`.
+ * Only `running`/`queued` can be stale; a stale job keeps its original status.
+ */
+export function resolveFlowJobStatus(args: {
+  stateStatus?: unknown
+  intakeStatus?: unknown
+  stateUpdatedAt?: unknown
+  fileMtimeMs?: number
+  nowMs?: number
+  staleMs?: number
+}): { status: FlowJobStatus; status_source: FlowJobStatusSource; updated_at: string; stale: boolean } {
+  const fromState = normalizeJobStatus(args.stateStatus)
+  const fromIntake = normalizeJobStatus(args.intakeStatus)
+  const status: FlowJobStatus = fromState ?? fromIntake ?? 'unknown'
+  const status_source: FlowJobStatusSource = fromState ? 'state' : fromIntake ? 'intake' : 'unknown'
+  const stateMs = parseJobTime(args.stateUpdatedAt)
+  const fileMs =
+    typeof args.fileMtimeMs === 'number' && Number.isFinite(args.fileMtimeMs) ? args.fileMtimeMs : null
+  const updatedMs = stateMs ?? fileMs
+  const nowMs = args.nowMs ?? Date.now()
+  const threshold = args.staleMs ?? staleAfterMs()
+  const stale =
+    (status === 'running' || status === 'queued') &&
+    (updatedMs === null || nowMs - updatedMs > threshold)
+  return {
+    status,
+    status_source,
+    updated_at: updatedMs === null ? new Date(0).toISOString() : new Date(updatedMs).toISOString(),
+    stale
+  }
+}
+
+function readStateSummary(abs: string): { status?: unknown; updated_at?: unknown } {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(abs, 'utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { status: (parsed as any).status, updated_at: (parsed as any).updated_at }
+    }
+  } catch {
+    // Corrupt state is still listed; status stays unknown rather than aborting.
+  }
+  return {}
+}
+
+/**
+ * List `state/*.json` with real status metadata. `intakeStatusById` is the
+ * optional fallback when a state file has no `status` field.
+ */
+export function listJobs(
+  root: string,
+  intakeStatusById: Map<string, unknown> = new Map(),
+  options: { nowMs?: number; staleMs?: number } = {}
+): JobSummary[] {
   const dir = path.join(root, 'state')
-  const rows: Array<JobSummary & { mtimeMs: number }> = []
+  const rows: Array<{ job: JobSummary; mtimeMs: number }> = []
   for (const name of listFiles(dir)) {
     if (!name.endsWith('.json')) continue
     const abs = path.join(dir, name)
@@ -154,15 +259,56 @@ function listJobs(root: string): JobSummary[] {
     } catch {
       continue
     }
+    const id = name.slice(0, -'.json'.length)
+    const state = readStateSummary(abs)
+    const resolved = resolveFlowJobStatus({
+      stateStatus: state.status,
+      intakeStatus: intakeStatusById.get(id),
+      stateUpdatedAt: state.updated_at,
+      fileMtimeMs: stat.mtimeMs,
+      nowMs: options.nowMs,
+      staleMs: options.staleMs
+    })
     rows.push({
-      id: name.slice(0, -'.json'.length),
-      updated_at: new Date(stat.mtimeMs).toISOString(),
-      size: stat.size,
+      job: {
+        id,
+        updated_at: resolved.updated_at,
+        size: stat.size,
+        status: resolved.status,
+        status_source: resolved.status_source,
+        stale: resolved.stale
+      },
       mtimeMs: stat.mtimeMs
     })
   }
   rows.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  return rows.map(({ id, updated_at, size }) => ({ id, updated_at, size }))
+  return rows.map(({ job }) => job)
+}
+
+/** Best-effort intake list used only as a status fallback; never fails the page. */
+async function fetchIntakeStatusMap(): Promise<Map<string, unknown>> {
+  const base = process.env.STUDIO_INTAKE_URL?.trim()
+  if (!base) return new Map()
+  const headers: Record<string, string> = {}
+  const token = process.env.WEB_WRITE_TOKEN?.trim()
+  if (token) headers['X-Web-Token'] = token
+  try {
+    const upstream = await fetch(`${base.replace(/\/$/, '')}/intake/jobs?limit=200`, {
+      headers,
+      signal: AbortSignal.timeout(2500)
+    })
+    if (!upstream.ok) return new Map()
+    const body = await upstream.json().catch(() => null)
+    const items = Array.isArray(body?.items) ? body.items : []
+    const map = new Map<string, unknown>()
+    for (const item of items) {
+      const id = typeof item?.id === 'string' ? item.id : ''
+      if (id) map.set(id, item?.state)
+    }
+    return map
+  } catch {
+    return new Map()
+  }
 }
 
 /** Read one `<dir>/decisions/<job>.jsonl`; bad lines warn instead of aborting. */
@@ -470,7 +616,9 @@ export async function flowData(url: URL): Promise<{ status: number; body: any }>
   }
 
   const warnings: Warn = []
-  const jobs = listJobs(root)
+  // #job-status: state.status wins; intake is only a fallback for jobs whose
+  // state file predates the status field. Delivery presence is never consulted.
+  const jobs = listJobs(root, await fetchIntakeStatusMap())
   const meta = { root, generated_at: new Date().toISOString(), warnings }
   const logs = readLogs(root, warnings)
   const requested = (url.searchParams.get('job') ?? '').trim()

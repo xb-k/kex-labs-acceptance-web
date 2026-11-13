@@ -630,10 +630,16 @@ export type IssueCommentResponse = {
 
 /* ---------- /api/flow · /api/contract（T-WEB-015d2） ---------- */
 
+export type FlowJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'unknown'
+export type FlowJobStatusSource = 'state' | 'intake' | 'unknown'
+
 export type FlowJobSummary = {
   id: string
   updated_at: string
   size: number
+  status: FlowJobStatus
+  status_source: FlowJobStatusSource
+  stale: boolean
 }
 
 export type FlowTool = {
