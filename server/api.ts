@@ -61,6 +61,7 @@ import { handleAgentsRoute } from './agents'
 import { handleAgentLibraryRoute } from './agent-sync'
 import { handleDecisionsRoute } from './decisions'
 import { handleGeminiRoute } from './gemini'
+import { handleScriptTemplatesRoute } from './script-templates-api'
 import { ollamaFetch } from './ollama'
 import { handleUploadsRoute } from './uploads'
 import { handleVideoOptimizeRoute } from './video-optimize'
@@ -4445,6 +4446,18 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       atomicWriteJson,
       readBody: readRequestBody,
       authorizeWrite: (r) => authorizeTaskWrite(r)
+    })
+    return
+  }
+
+  if (pathname === '/api/script-templates' || pathname.startsWith('/api/script-templates/')) {
+    await handleScriptTemplatesRoute(req, res, pathname, {
+      dataRoot: DATA_ROOT,
+      readJson,
+      atomicWriteJson,
+      readBody: readRequestBody,
+      authorize: (r) => authorizeTaskWrite(r),
+      sendJson
     })
     return
   }
