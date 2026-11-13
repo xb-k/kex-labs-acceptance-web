@@ -11,7 +11,9 @@ export function StageNodeTrack({
   nodes,
   activeKey,
   onSelectNode,
-  stageArtifacts
+  stageArtifacts,
+  onRetryNode,
+  retryBusy = false
 }: {
   job?: FlowJob | null
   brief?: StudioBrief | null
@@ -20,6 +22,8 @@ export function StageNodeTrack({
   activeKey: string
   onSelectNode: (key: string) => void
   stageArtifacts: FlowArtifact[]
+  onRetryNode?: () => void | Promise<void>
+  retryBusy?: boolean
 }) {
   const activeNode = nodes.find((n) => n.key === activeKey) ?? nodes[0]
   const roleMeta = AGENT_ROLES.find((r) => r.id === activeNode?.role)
@@ -69,12 +73,15 @@ export function StageNodeTrack({
             <div className="flex flex-wrap items-center gap-2 pt-1">
               <button
                 type="button"
-                disabled
-                title="尚未接入真实重跑接口，本轮不会触发任何执行"
-                className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg bg-apple-text px-3 py-1.5 text-xs font-medium text-white opacity-60 whitespace-nowrap"
+                disabled={!onRetryNode || retryBusy}
+                onClick={() => void onRetryNode?.()}
+                title={onRetryNode ? '提交后端重跑当前任务' : '当前任务不可重跑'}
+                className={`inline-flex items-center gap-1.5 rounded-lg bg-apple-text px-3 py-1.5 text-xs font-medium text-white whitespace-nowrap ${
+                  !onRetryNode || retryBusy ? 'cursor-not-allowed opacity-60' : 'hover:bg-black'
+                }`}
               >
                 <Refresh className="h-3.5 w-3.5" />
-                {`重跑未接入 (${activeNode.code})`}
+                {retryBusy ? '提交重跑中…' : `提交重跑 (${activeNode.code})`}
               </button>
               {activeNode.key === 'SCRIPT' && (
                 <Link

@@ -165,24 +165,66 @@ function listJobs(root: string): JobSummary[] {
   return rows.map(({ id, updated_at, size }) => ({ id, updated_at, size }))
 }
 
-function readDecisions(root: string, job: string, warnings: Warn): any[] {
-  const file = path.join(root, 'decisions', `${job}.jsonl`)
+/** Read one `<dir>/decisions/<job>.jsonl`; bad lines warn instead of aborting. */
+function readDecisionLines(dir: string, job: string, warnings: Warn): any[] {
+  const file = path.join(dir, 'decisions', `${job}.jsonl`)
   const text = readText(file)
   if (text === null) return []
-  const lines = text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    .slice(-20)
   const out: any[] = []
-  for (const line of lines) {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
     try {
-      out.push(JSON.parse(line))
+      out.push(JSON.parse(trimmed))
     } catch {
       warnings.push(`bad decision line in ${job}.jsonl`)
     }
   }
   return out
+}
+
+function decisionAt(value: any): number {
+  const raw = typeof value?.at === 'string' ? value.at : null
+  const t = raw ? Date.parse(raw) : NaN
+  return Number.isNaN(t) ? 0 : t
+}
+
+/**
+ * #122/#127: merge the read-only `KEX_REPO_ROOT/decisions` log with the web-
+ * writable `WEB_DATA_ROOT/decisions` copy. Identical JSON lines are deduped,
+ * oldest → newest by `at`, and only the newest 20 survive (same shape as the
+ * pre-#122 reader).
+ */
+export function mergeDecisions(groups: any[][], limit = 20): any[] {
+  const seen = new Set<string>()
+  const out: any[] = []
+  for (const group of groups) {
+    for (const decision of group) {
+      const key = JSON.stringify(decision)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(decision)
+    }
+  }
+  out.sort((a, b) => decisionAt(a) - decisionAt(b))
+  return out.slice(-limit)
+}
+
+export function readDecisions(
+  root: string,
+  job: string,
+  warnings: Warn,
+  writableRoot: string | null = null
+): any[] {
+  const dirs = [root]
+  if (writableRoot && path.resolve(writableRoot) !== path.resolve(root)) dirs.push(writableRoot)
+  return mergeDecisions(dirs.map((dir) => readDecisionLines(dir, job, warnings)))
+}
+
+/** Runtime view of `WEB_DATA_ROOT` so tests can point it at a fixture. */
+export function decisionsWritableRoot(): string {
+  const env = process.env.WEB_DATA_ROOT
+  return env ? path.resolve(env) : DATA_ROOT
 }
 
 function readReport(
@@ -412,7 +454,7 @@ function buildJob(root: string, id: string, state: any, warnings: Warn) {
     quality: state?.quality ?? null,
     quality_gate: state?.quality_gate ?? null,
     artifacts,
-    decisions: readDecisions(root, id, warnings),
+    decisions: readDecisions(root, id, warnings, decisionsWritableRoot()),
     reports: {
       render: readReport(root, id, state, 'render_report', warnings),
       assemble: readReport(root, id, state, 'assemble_report', warnings),

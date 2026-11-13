@@ -57,6 +57,7 @@ import {
   type StudioContext
 } from './studio'
 import { handleAgentsRoute } from './agents'
+import { handleDecisionsRoute } from './decisions'
 import { handleGeminiRoute } from './gemini'
 import { handleUploadsRoute } from './uploads'
 import { handleVideoOptimizeRoute } from './video-optimize'
@@ -4391,6 +4392,16 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       return
     }
     sendJson(res, 200, await buildSnapshot({ source, jobId: job }))
+    return
+  }
+
+  if (pathname === '/api/decisions') {
+    await handleDecisionsRoute(req, res, url, pathname, {
+      dataRoot: DATA_ROOT,
+      env: process.env,
+      authorize: authorizeTaskWrite,
+      sendJson
+    })
     return
   }
 

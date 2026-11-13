@@ -3,6 +3,7 @@ import { Check, Refresh, Split } from '../icons'
 import {
   AGENT_ROLES,
   type AgentRoleId,
+  type ShotRoleAction,
   type ShotStoryboardItem
 } from './production-data'
 
@@ -13,13 +14,19 @@ export function ShotAgentMatrix({
   selectedShotId,
   onSelectShot,
   roleFilter,
-  onRoleFilter
+  onRoleFilter,
+  jobId = null,
+  onDecision,
+  decisionBusyKey = null
 }: {
   shots: ShotStoryboardItem[]
   selectedShotId: number
   onSelectShot: (shotId: number) => void
   roleFilter: AgentRoleId
   onRoleFilter: (role: AgentRoleId) => void
+  jobId?: string | null
+  onDecision?: (action: ShotRoleAction, decision: 'adopt' | 'reject') => void | Promise<void>
+  decisionBusyKey?: string | null
 }) {
   const [monitorStage, setMonitorStage] = useState<MonitorStage>('redrawn')
   const [compareSplit, setCompareSplit] = useState(false)
@@ -290,24 +297,43 @@ export function ShotAgentMatrix({
                     </div>
 
                     <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        disabled
-                        title="尚未接入真实采纳接口，本轮不会写入任何处置状态"
-                        className="inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-black/[0.08] bg-white px-2 py-1 text-[11px] font-medium text-apple-subtext opacity-60 whitespace-nowrap"
-                      >
-                        <Check className="h-3 w-3" />
-                        采纳未接入
-                      </button>
-                      <button
-                        type="button"
-                        disabled
-                        title="尚未接入真实驳回接口，本轮不会触发重跑"
-                        className="inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-black/[0.08] bg-white px-2 py-1 text-[11px] font-medium text-apple-subtext opacity-60 whitespace-nowrap"
-                      >
-                        <Refresh className="h-3 w-3" />
-                        驳回重跑未接入
-                      </button>
+                      {(['adopt', 'reject'] as const).map((decision) => {
+                        const busy = decisionBusyKey === `${act.id}:${decision}`
+                        const disabled = !jobId || !onDecision || decisionBusyKey !== null
+                        const label =
+                          decision === 'adopt'
+                            ? busy
+                              ? '采纳中…'
+                              : '采纳'
+                            : busy
+                              ? '驳回中…'
+                              : '驳回重跑'
+                        return (
+                          <button
+                            key={decision}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => void onDecision?.(act, decision)}
+                            title={
+                              !jobId
+                                ? '未选择任务，无法写入处置状态'
+                                : decision === 'adopt'
+                                  ? '写入采纳决策并刷新审计日志'
+                                  : '写入驳回决策，等待后续重跑'
+                            }
+                            className={`inline-flex items-center gap-1 rounded-md border border-black/[0.08] bg-white px-2 py-1 text-[11px] font-medium text-apple-subtext whitespace-nowrap ${
+                              disabled ? 'cursor-not-allowed opacity-60' : 'hover:bg-black/[0.04]'
+                            }`}
+                          >
+                            {decision === 'adopt' ? (
+                              <Check className="h-3 w-3" />
+                            ) : (
+                              <Refresh className="h-3 w-3" />
+                            )}
+                            {label}
+                          </button>
+                        )
+                      })}
                     </div>
                   </div>
 

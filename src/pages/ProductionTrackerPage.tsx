@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useLiveJson, useSystem } from '../api'
+import { HttpError, postJson, useLiveJson, useSystem } from '../api'
 import { DailyEfficiencyCard } from '../components/production/DailyEfficiencyCard'
 import { enrichAndFilterJobs, JobPicker } from '../components/production/JobPicker'
 import { ShotAgentMatrix } from '../components/production/ShotAgentMatrix'
@@ -7,7 +7,8 @@ import { StageNodeTrack } from '../components/production/StageNodeTrack'
 import {
   buildPipelineNodes,
   buildStoryboard,
-  type AgentRoleId
+  type AgentRoleId,
+  type ShotRoleAction
 } from '../components/production/production-data'
 import {
   Alert,
@@ -111,6 +112,8 @@ export function ProductionTrackerPage() {
   const [roleFilter, setRoleFilter] = useState<AgentRoleId>('all')
   const [alertFilter, setAlertFilter] = useState<'all' | OverviewAlert['type']>('all')
   const [decisionRoleFilter, setDecisionRoleFilter] = useState<string>('all')
+  const [retryBusy, setRetryBusy] = useState(false)
+  const [decisionBusyKey, setDecisionBusyKey] = useState<string | null>(null)
 
   const deliveries = deliveriesRes.data?.deliveries ?? []
   const activeRenderingJobs = useMemo(
@@ -230,6 +233,59 @@ export function ProductionTrackerPage() {
       briefsState.refresh()
     ])
     showToast('已同步最新节点、主机与交付数据')
+  }
+
+  const actionError = (err: unknown) =>
+    err instanceof HttpError
+      ? err.message
+      : err instanceof Error
+        ? err.message
+        : '请求失败，请稍后重试'
+
+  const handleRetryJob = async () => {
+    const jobId = job?.id
+    if (!jobId || retryBusy) return
+    setRetryBusy(true)
+    try {
+      const created = await postJson<{ id?: string }>(
+        `/api/studio/jobs/${encodeURIComponent(jobId)}/retry`,
+        {}
+      )
+      showToast(`已提交重跑：${created.id ?? jobId}`)
+      await Promise.all([flow.refresh(), studioJobsRes.refresh()])
+    } catch (err) {
+      // 409 = 任务不是 failed/canceled；直接显示后端 error，不做本地假成功。
+      showToast(`重跑失败：${actionError(err)}`)
+    } finally {
+      setRetryBusy(false)
+    }
+  }
+
+  const handleDecision = async (action: ShotRoleAction, decision: 'adopt' | 'reject') => {
+    const jobId = job?.id
+    const key = `${action.id}:${decision}`
+    if (!jobId || decisionBusyKey) return
+    setDecisionBusyKey(key)
+    try {
+      await postJson<{ decision?: { at?: string } }>('/api/decisions', {
+        job: jobId,
+        action: decision,
+        actor: '制片总台',
+        note: action.actionTitle,
+        stage: action.stageKey,
+        tool: action.tool
+      })
+      showToast(
+        decision === 'adopt'
+          ? `已采纳「${action.actionTitle}」`
+          : `已驳回「${action.actionTitle}」，等待重跑`
+      )
+      await flow.refresh()
+    } catch (err) {
+      showToast(`${decision === 'adopt' ? '采纳' : '驳回'}失败：${actionError(err)}`)
+    } finally {
+      setDecisionBusyKey(null)
+    }
   }
 
   return (
@@ -564,6 +620,8 @@ export function ProductionTrackerPage() {
         activeKey={effectiveStageKey}
         onSelectNode={setActiveStageKey}
         stageArtifacts={activeNodeArtifacts}
+        onRetryNode={job?.id ? handleRetryJob : undefined}
+        retryBusy={retryBusy}
       />
 
       {/* Section 2: Per-Shot Monitor & 6-Role Agent Collaboration Matrix */}
@@ -573,6 +631,9 @@ export function ProductionTrackerPage() {
         onSelectShot={setSelectedShotId}
         roleFilter={roleFilter}
         onRoleFilter={setRoleFilter}
+        jobId={job?.id ?? null}
+        onDecision={handleDecision}
+        decisionBusyKey={decisionBusyKey}
       />
 
       {/* Section 3: L3 Orchestrator Decision Audit Log (Active Job Execution Stream) */}
