@@ -1,9 +1,11 @@
 import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { importAgent } from '../../agents'
+import { isAbortError } from '../../api'
 import { useModalA11y } from '../../hooks'
 import type { AgentMeta, AgentType } from '../../types'
 import { Close, TriangleAlert } from '../icons'
 import { SelectMenu } from '../SelectMenu'
+import { AsyncStatusLine } from '../ui'
 import {
   TYPES,
   TYPE_HINT,
@@ -85,29 +87,55 @@ export function ImportDialog({
   const [repo, setRepo] = useState('')
   const [commit, setCommit] = useState('')
   const [busy, setBusy] = useState(false)
+  const [startedAt, setStartedAt] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const controllerRef = useRef<AbortController | null>(null)
   const urlRef = useRef<HTMLInputElement>(null)
+
+  function cancelImport() {
+    controllerRef.current?.abort()
+  }
+
+  function closeDialog() {
+    controllerRef.current?.abort()
+    onClose()
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (busy) return
     if (!url.trim()) {
       setError('URL 不能为空。')
       return
     }
+    const controller = new AbortController()
+    controllerRef.current = controller
     setBusy(true)
+    setStartedAt(Date.now())
     setError(null)
+    setNotice(null)
     try {
-      const result = await importAgent({
-        type,
-        url: url.trim(),
-        license: license.trim() || undefined,
-        repo: repo.trim() || undefined,
-        commit: commit.trim() || undefined
-      })
+      const result = await importAgent(
+        {
+          type,
+          url: url.trim(),
+          license: license.trim() || undefined,
+          repo: repo.trim() || undefined,
+          commit: commit.trim() || undefined
+        },
+        controller.signal
+      )
       onImported(result.meta)
     } catch (err) {
-      setError(describeError(err))
+      if (isAbortError(err)) {
+        setNotice('已取消导入；在途请求已中断。')
+      } else {
+        setError(describeError(err))
+      }
     } finally {
+      controllerRef.current = null
+      setStartedAt(null)
       setBusy(false)
     }
   }
@@ -117,7 +145,7 @@ export function ImportDialog({
       titleId="agent-import-title"
       title="导入定义"
       description="仅允许 GitHub raw / gist / jsDelivr 的文本 URL；无 license 或含疑似密钥会被拒绝。"
-      onClose={busy ? () => undefined : onClose}
+      onClose={closeDialog}
       initialFocusRef={urlRef}
     >
       <form onSubmit={(event) => void submit(event)} className="flex min-h-0 flex-1 flex-col" data-testid="import-dialog">
@@ -203,6 +231,28 @@ export function ImportDialog({
             />
           </div>
 
+          {busy && (
+            <AsyncStatusLine
+              testId="agent-import-status"
+              label="正在导入定义"
+              startedAt={startedAt}
+              stages={['下载定义', '校验 license / 密钥', '写入新版本']}
+              stage={0}
+              detail="可在下方取消，取消会中断在途请求"
+              onCancel={cancelImport}
+            />
+          )}
+
+          {notice && (
+            <p
+              role="status"
+              data-testid="import-notice"
+              className="rounded-[10px] bg-[#EAF8EE] px-2.5 py-2 text-[12px] leading-relaxed text-[#1E7A3C]"
+            >
+              {notice}
+            </p>
+          )}
+
           {error && (
             <p
               role="alert"
@@ -216,8 +266,13 @@ export function ImportDialog({
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-black/[0.06] px-5 py-3">
-          <button type="button" onClick={onClose} disabled={busy} className={secondaryButton}>
-            取消
+          <button
+            type="button"
+            onClick={busy ? cancelImport : onClose}
+            data-testid="import-cancel"
+            className={secondaryButton}
+          >
+            {busy ? '取消导入' : '取消'}
           </button>
           <button type="submit" disabled={busy || !url.trim()} data-testid="import-submit" className={primaryButton}>
             {busy ? '导入中…' : '导入'}

@@ -234,6 +234,32 @@ export function galleryStatusLabel(status: StudioJobStatus): string {
   return STATUS_LABEL[status] ?? status
 }
 
+/** #136 图片任务等待阶段：提交 → 排队 → 生成 → 完成（终态也停留在对应阶段）。 */
+export const IMAGE_WAIT_STAGES = ['提交请求', '排队等待', '模型生成', '完成'] as const
+
+export type ImageWaitStage = {
+  /** 0-based，用于 AsyncStatusLine 的 stage。 */
+  stage: number
+  label: string
+}
+
+export function imageWaitStage(status: StudioJobStatus | null | undefined): ImageWaitStage {
+  switch (status) {
+    case 'queued':
+      return { stage: 1, label: '已入队，等待 GPU 排队' }
+    case 'running':
+      return { stage: 2, label: '模型正在生成图片' }
+    case 'succeeded':
+      return { stage: 3, label: '图片生成完成' }
+    case 'failed':
+      return { stage: 2, label: '图片生成失败' }
+    case 'canceled':
+      return { stage: 2, label: '图片任务已取消' }
+    default:
+      return { stage: 1, label: '已提交，等待 studio 返回状态' }
+  }
+}
+
 /**
  * #139 真实耗时展示：`duration_ms` 为 null 时不估算，直接给「耗时未记录」。
  * <60s 保留一位小数（12.3s），≥60s 用 `1m 03s`；负值 / 非有限值按未记录处理。

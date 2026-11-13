@@ -11,7 +11,7 @@ import type {
 } from '../types'
 import { Field, inputClass, primaryButton, quietButton } from './studio-ui'
 import { StudioStatusChip } from './StudioStatusChip'
-import { ToastHost } from './ui'
+import { AsyncStatusLine, ToastHost } from './ui'
 import { Trash } from './icons'
 import { useInfiniteScrollBatch, useToast } from '../hooks'
 import {
@@ -26,6 +26,8 @@ import {
   canDeleteJob,
   formatJobDuration,
   galleryMeta,
+  IMAGE_WAIT_STAGES,
+  imageWaitStage,
   galleryPrimaryImage,
   galleryStatusLabel,
   imageActionState,
@@ -66,10 +68,11 @@ function requestErrorText(err: unknown): string {
 }
 
 /** 提交后的 4s 轮询：状态以 studio 为准，终态即停，不伪造成功。 */
-function ImageJobTracker({ jobId }: { jobId: string }) {
+function ImageJobTracker({ jobId, startedAt }: { jobId: string; startedAt: number | null }) {
   const [job, setJob] = useState<StudioJob | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [settled, setSettled] = useState(false)
+  const [finishedAt, setFinishedAt] = useState<number | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -77,6 +80,7 @@ function ImageJobTracker({ jobId }: { jobId: string }) {
     setJob(null)
     setError(null)
     setSettled(false)
+    setFinishedAt(null)
 
     const stop = () => {
       if (timer !== null) {
@@ -92,6 +96,7 @@ function ImageJobTracker({ jobId }: { jobId: string }) {
         setJob(next)
         setError(null)
         if (next.status === 'succeeded' || next.status === 'failed' || next.status === 'canceled') {
+          setFinishedAt(Date.now())
           setSettled(true)
           stop()
         }
@@ -109,29 +114,37 @@ function ImageJobTracker({ jobId }: { jobId: string }) {
     }
   }, [jobId])
 
+  const wait = imageWaitStage(job?.status)
+  const failed = job?.status === 'failed'
+  const finalElapsedMs =
+    settled && finishedAt != null && startedAt != null ? finishedAt - startedAt : undefined
+
   return (
     <div
       className="rounded-[12px] border border-black/[0.06] bg-apple-bg/50 px-3 py-2.5"
-      aria-live="polite"
       data-testid="image-job-tracker"
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="num break-all text-[12px] font-medium">{jobId}</span>
-        {job ? <StudioStatusChip status={job.status} /> : <span className="text-[11px] text-apple-subtext">读取中…</span>}
+        {job ? (
+          <StudioStatusChip status={job.status} />
+        ) : (
+          <span className="text-[11px] text-apple-subtext">读取中…</span>
+        )}
         {settled && <span className="text-[11px] text-apple-subtext">已停止轮询</span>}
       </div>
-      <p className="mt-1 text-[11px] leading-relaxed text-apple-subtext">
-        阶段：<span className="num">{job?.stage ?? '等待 studio'}</span>
-        {' · '}每 4 秒刷新，状态与失败原因以 studio 为准。
-      </p>
-      {job?.error && (
-        <p
-          className="mt-1.5 break-words rounded-[8px] bg-[#FCEDEB] px-2.5 py-1.5 text-[11px] leading-relaxed text-[#B3261E] ring-1 ring-inset ring-[#F3D3CF]"
-          role="alert"
-        >
-          {job.error}
-        </p>
-      )}
+      <AsyncStatusLine
+        className="mt-2"
+        testId="image-wait-status"
+        label={wait.label}
+        startedAt={settled ? null : startedAt}
+        elapsedMs={finalElapsedMs}
+        stages={IMAGE_WAIT_STAGES}
+        stage={wait.stage}
+        active={!settled}
+        detail={settled ? undefined : '每 4 秒刷新，状态与失败原因以 studio 为准'}
+        error={failed ? job?.error ?? '生成失败（studio 未返回 error）' : null}
+      />
       {error && (
         <p className="mt-1.5 break-words text-[11px] leading-relaxed text-[#B3261E]" role="alert">
           轮询失败：{error}
@@ -285,6 +298,7 @@ export function ImageWorkbench({
   const [formError, setFormError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [submitStartedAt, setSubmitStartedAt] = useState<number | null>(null)
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const [galleryJob, setGalleryJob] = useState('')
   const [selected, setSelected] = useState<SelectedImage | null>(null)
@@ -409,12 +423,15 @@ export function ImageWorkbench({
       return
     }
     setSubmitting(true)
+    const startedAt = Date.now()
+    setSubmitStartedAt(startedAt)
     try {
       const job = await postJson<StudioJob>('/api/studio/jobs', buildImageJobPayload(checked.image))
       setActiveJobId(job.id)
       setNotice(`已提交图片任务 ${job.id}。状态每 4 秒刷新，产物见下方 gallery。`)
       gallery.refresh()
     } catch (err) {
+      setSubmitStartedAt(null)
       setFormError(requestErrorText(err))
     } finally {
       setSubmitting(false)
@@ -748,11 +765,21 @@ export function ImageWorkbench({
           <button type="submit" data-testid="image-submit" disabled={submitting || uploading} className={primaryButton}>
             {submitting ? '提交中…' : uploading ? '参考图上传中…' : '提交图片任务'}
           </button>
+          {submitting && (
+            <AsyncStatusLine
+              testId="image-submit-status"
+              label="正在提交图片任务"
+              startedAt={submitStartedAt}
+              stages={IMAGE_WAIT_STAGES}
+              stage={0}
+              detail="提交后每 4 秒刷新排队 / 生成状态"
+            />
+          )}
           <p id="image-form-hint" className="text-[11px] leading-relaxed text-apple-subtext">
             同源写 <span className="num">/api/studio/jobs</span>；生成失败时展示 studio 返回的 reason，不伪造成功。
           </p>
 
-          {activeJobId && <ImageJobTracker jobId={activeJobId} />}
+          {activeJobId && <ImageJobTracker jobId={activeJobId} startedAt={submitStartedAt} />}
         </form>
 
         <div className="min-w-0 space-y-3">

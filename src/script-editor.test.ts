@@ -11,6 +11,7 @@ import {
   normalizeAgentProfileId,
   resolveHistoricalGroundingActive,
   sanitizeExportFilename,
+  scheduleWaitLabel,
   SCRIPT_PRESETS,
   STORY_ERA_OPTIONS,
   SYNC_INTERVAL_OPTIONS,
@@ -136,6 +137,12 @@ test('mergePlatformProfiles preserves canonical 4 profiles and appends active cu
   assert.equal(merged[0].description, '商业广告级青橙配色预设')
   assert.equal(merged[4].id, 'user-cyber-noir')
   assert.equal(merged[4].source, 'custom')
+})
+
+test('#136 定时同步等待文案：区分开关与间隔，说明具体动作而不是泛化「保存中」', () => {
+  assert.equal(scheduleWaitLabel({ autoSyncEnabled: false }), '正在切换为手动触发同步')
+  assert.equal(scheduleWaitLabel({ intervalHours: 12 }), '正在保存定时同步策略（每 12 小时）')
+  assert.equal(scheduleWaitLabel({}), '正在保存定时同步策略')
 })
 
 test('resolveHistoricalGroundingActive defaults to off and only enables on explicit opt-in or a non-empty story era', () => {

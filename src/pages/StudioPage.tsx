@@ -11,7 +11,7 @@ import { StudioProbePanel, type ProbeState } from '../components/studio/StudioPr
 import { StudioQueueDrawer } from '../components/studio/StudioQueueDrawer'
 import { StudioUploadZone, type UploadSession } from '../components/studio/StudioUploadZone'
 import { VideoOptimizeWorkbench } from '../components/studio/VideoOptimizeWorkbench'
-import { ToastHost } from '../components/ui'
+import { AsyncStatusLine, ToastHost } from '../components/ui'
 import { formatClockMs, formatSizeBytes } from '../format'
 import { useToast } from '../hooks'
 import { buildAigcJobPayload } from '../image-workbench'
@@ -143,6 +143,8 @@ export function StudioPage() {
   const [briefChoice, setBriefChoice] = useState('none')
   const [linkBrief, setLinkBrief] = useState<StudioBrief | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [submitStartedAt, setSubmitStartedAt] = useState<number | null>(null)
+  const [createdStartedAt, setCreatedStartedAt] = useState<number | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [keyframeAsset, setKeyframeAsset] = useState<StudioKeyframeRef | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -445,6 +447,8 @@ export function StudioPage() {
     }
 
     setSubmitting(true)
+    const startedAt = Date.now()
+    setSubmitStartedAt(startedAt)
     const briefId: string | null = briefChoice === 'none' ? null : submitGateBrief!.id
     try {
       const payload = buildAigcJobPayload({
@@ -457,6 +461,7 @@ export function StudioPage() {
 
       setNotice(`已提交 ${job.id}。任务状态与阶段以 studio 为准，列表每 4 秒刷新。`)
       setCreatedJobId(job.id)
+      setCreatedStartedAt(startedAt)
       updateSearchParams({ job: job.id })
       resetForm()
       jobs.refresh()
@@ -474,6 +479,7 @@ export function StudioPage() {
             : '提交失败'
       setFormError(message)
     } finally {
+      setSubmitStartedAt(null)
       setSubmitting(false)
     }
   }
@@ -488,6 +494,8 @@ export function StudioPage() {
 
     setBError(null)
     setSubmitting(true)
+    const startedAt = Date.now()
+    setSubmitStartedAt(startedAt)
     const brief = briefChoice === 'none' ? null : submitGateBrief
     try {
       const job = await postJson<StudioJob>(
@@ -496,6 +504,7 @@ export function StudioPage() {
       )
       setNotice(`已提交 B 轨任务 ${job.id}。任务状态与阶段以 studio 为准，列表每 4 秒刷新。`)
       setCreatedJobId(job.id)
+      setCreatedStartedAt(startedAt)
       updateSearchParams({ job: job.id })
       resetForm()
       jobs.refresh()
@@ -515,11 +524,23 @@ export function StudioPage() {
             : '提交失败'
       setBError(reason && reason !== message ? `${message}（reason: ${reason}）` : message)
     } finally {
+      setSubmitStartedAt(null)
       setSubmitting(false)
     }
   }
 
   const jobsData = jobs.data?.items ?? []
+  const createdJob = createdJobId ? jobsData.find((job) => job.id === createdJobId) ?? null : null
+  const createdJobStatus = createdJob?.status ?? null
+  // 刚提交的任务可能还没出现在下一次 4s 队列快照里；最多等 60 秒，避免一直显示「等待刷新」。
+  const createdPendingLookup =
+    createdJobId !== null &&
+    createdJob === null &&
+    createdStartedAt !== null &&
+    Date.now() - createdStartedAt < 60_000
+  const createdWaiting = createdJob
+    ? createdJobStatus === 'queued' || createdJobStatus === 'running'
+    : createdPendingLookup
   const focusMissingId =
     focusJobId && jobs.status === 'ready' && !jobsData.some((job) => job.id === focusJobId)
       ? focusJobId
@@ -757,6 +778,43 @@ export function StudioPage() {
                   >
                     {formError}
                   </p>
+                )}
+
+                {submitting && (
+                  <AsyncStatusLine
+                    testId="studio-submit-status"
+                    label="正在创建渲染任务"
+                    startedAt={submitStartedAt}
+                    stages={['提交请求', '入队', '排队等待', '渲染']}
+                    stage={0}
+                    detail="提交后队列每 4 秒刷新"
+                  />
+                )}
+
+                {!submitting && createdWaiting && (
+                  <AsyncStatusLine
+                    testId="studio-submit-status"
+                    label={
+                      createdJobStatus === 'running'
+                        ? '渲染任务执行中'
+                        : createdJobStatus === 'queued'
+                          ? '渲染任务已入队，等待 GPU 排队'
+                          : '已提交，等待队列刷新'
+                    }
+                    startedAt={createdStartedAt}
+                    stages={['提交请求', '入队', '排队等待', '渲染']}
+                    stage={createdJobStatus === 'running' ? 3 : 2}
+                    detail="队列每 4 秒刷新"
+                  />
+                )}
+
+                {!submitting && createdJobStatus === 'failed' && (
+                  <AsyncStatusLine
+                    testId="studio-submit-status"
+                    label="渲染任务失败"
+                    startedAt={null}
+                    error={createdJob?.error ?? 'studio 未返回失败原因'}
+                  />
                 )}
 
                 {notice && (

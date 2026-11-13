@@ -48,11 +48,17 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
-function sendJson<T>(url: string, method: 'POST' | 'PUT', body: unknown): Promise<T> {
+function sendJson<T>(
+  url: string,
+  method: 'POST' | 'PUT',
+  body: unknown,
+  signal?: AbortSignal
+): Promise<T> {
   return request<T>(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {})
   })
 }
 
@@ -74,12 +80,16 @@ export function getAgent(type: AgentType, id: string): Promise<AgentDetail> {
   return request<AgentDetail>(itemUrl(type, id))
 }
 
-export function seedAgents(): Promise<AgentSeedResponse> {
-  return sendJson<AgentSeedResponse>('/api/agents/seed', 'POST', {})
+export function seedAgents(signal?: AbortSignal): Promise<AgentSeedResponse> {
+  return sendJson<AgentSeedResponse>('/api/agents/seed', 'POST', {}, signal)
 }
 
-export function importAgent(input: AgentImportInput): Promise<{ meta: AgentMeta }> {
-  return sendJson<{ meta: AgentMeta }>('/api/agents/import', 'POST', input)
+/** #136 导入可取消：signal 由 ImportDialog 持有，取消时真的中断在途请求。 */
+export function importAgent(
+  input: AgentImportInput,
+  signal?: AbortSignal
+): Promise<{ meta: AgentMeta }> {
+  return sendJson<{ meta: AgentMeta }>('/api/agents/import', 'POST', input, signal)
 }
 
 export function saveAgent(

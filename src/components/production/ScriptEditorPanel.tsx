@@ -25,6 +25,7 @@ import {
   mergePromptTemplates,
   resolveHistoricalGroundingActive,
   sanitizeExportFilename,
+  scheduleWaitLabel,
   SCRIPT_PRESETS,
   STORY_ERA_OPTIONS,
   SYNC_INTERVAL_OPTIONS,
@@ -132,6 +133,11 @@ export function ScriptEditorPanel({
   const [generateStage, setGenerateStage] = useState(0)
   const [syncStartedAt, setSyncStartedAt] = useState<number | null>(null)
   const [scheduleStartedAt, setScheduleStartedAt] = useState<number | null>(null)
+  const [schedulePatch, setSchedulePatch] = useState<{
+    autoSyncEnabled?: boolean
+    intervalHours?: number
+  } | null>(null)
+  const [scheduleError, setScheduleError] = useState<string | null>(null)
   const scriptAbortRef = useRef<AbortController | null>(null)
   const scriptAbortReasonRef = useRef<'cancel' | 'timeout' | null>(null)
   const scriptTimeoutRef = useRef<number | null>(null)
@@ -458,7 +464,9 @@ export function ScriptEditorPanel({
   const handleUpdateSchedule = async (patch: { autoSyncEnabled?: boolean; intervalHours?: number }) => {
     if (updatingSchedule) return
     setUpdatingSchedule(true)
+    setSchedulePatch(patch)
     setScheduleStartedAt(Date.now())
+    setScheduleError(null)
     try {
       const res = await patchJson<{ ok: boolean; sync: TemplateSyncState }>(
         '/api/gemini/script-templates/schedule',
@@ -471,7 +479,7 @@ export function ScriptEditorPanel({
           : '已切换为手动触发同步'
       )
     } catch (err) {
-      onNotify?.(err instanceof Error ? err.message : '更新同步策略失败')
+      setScheduleError(err instanceof Error ? err.message : '更新同步策略失败')
     } finally {
       setUpdatingSchedule(false)
       setScheduleStartedAt(null)
@@ -913,16 +921,26 @@ export function ScriptEditorPanel({
               </div>
             </div>
 
-            {(syncingSource !== null || updatingSchedule) && (
+            {(syncingSource !== null || updatingSchedule || scheduleError) && (
               <AsyncStatusLine
                 testId="script-template-sync-status"
                 label={
-                  syncingSource !== null
-                    ? `正在同步 ${syncingSource === 'gitea' ? 'Gitea 提示词库' : 'GitHub 提示词库'}`
-                    : '正在保存定时同步策略'
+                  scheduleError
+                    ? '保存定时同步策略失败'
+                    : syncingSource !== null
+                      ? `正在同步 ${syncingSource === 'gitea' ? 'Gitea 提示词库' : 'GitHub 提示词库'}`
+                      : schedulePatch
+                        ? scheduleWaitLabel(schedulePatch)
+                        : '正在保存定时同步策略'
                 }
                 startedAt={syncingSource !== null ? syncStartedAt : scheduleStartedAt}
-                detail="最长 30 秒"
+                detail={scheduleError ? undefined : '最长 30 秒'}
+                error={scheduleError}
+                onRetry={
+                  scheduleError && schedulePatch
+                    ? () => void handleUpdateSchedule(schedulePatch)
+                    : undefined
+                }
               />
             )}
 

@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { elapsedMilliseconds, formatElapsed, useElapsed } from './hooks'
 import { AsyncStatusLine } from './components/ui'
 import { isAbortError, postJson } from './api'
+import { importAgent } from './agents'
 
 function ElapsedProbe({ startedAt }: { startedAt: number }) {
   return createElement('span', { 'data-testid': 'elapsed-probe' }, formatElapsed(useElapsed(startedAt)))
@@ -108,6 +109,69 @@ test('postJson：透传 AbortSignal，取消真的 reject（AbortError）', asyn
   try {
     const controller = new AbortController()
     const pending = postJson('/api/gemini/script', { prompt: '测试' }, controller.signal)
+    assert.equal(received, controller.signal)
+    controller.abort()
+    await assert.rejects(pending, (err) => isAbortError(err))
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('AsyncStatusLine：终态用一次性 elapsedMs，停止呼吸动画并保留已用时长', () => {
+  const html = renderToStaticMarkup(
+    createElement(AsyncStatusLine, {
+      testId: 'image-wait-status',
+      label: '图片生成完成',
+      startedAt: null,
+      elapsedMs: 7_800,
+      stages: ['提交请求', '排队等待', '模型生成', '完成'],
+      stage: 3,
+      active: false
+    })
+  )
+  assert.match(html, /图片生成完成/)
+  assert.match(html, /第 4\/4 步：完成/)
+  assert.match(html, /已用 7\.8s/)
+  assert.match(html, /aria-busy="false"/)
+  assert.doesNotMatch(html, /animate-pulse/)
+})
+
+test('ImportDialog 等待行：busy 时显示阶段与可取消入口', () => {
+  const html = renderToStaticMarkup(
+    createElement(AsyncStatusLine, {
+      testId: 'agent-import-status',
+      label: '正在导入定义',
+      startedAt: 1_000_000,
+      stages: ['下载定义', '校验 license / 密钥', '写入新版本'],
+      stage: 0,
+      detail: '可在下方取消，取消会中断在途请求',
+      onCancel: () => {}
+    })
+  )
+  assert.match(html, /正在导入定义/)
+  assert.match(html, /下载定义/)
+  assert.match(html, /data-testid="async-cancel"/)
+  assert.match(html, /取消/)
+})
+
+test('importAgent：取消导入时透传 AbortSignal，请求真的中断（AbortError）', async () => {
+  const originalFetch = globalThis.fetch
+  let received: AbortSignal | undefined
+  globalThis.fetch = ((_url: string, init?: RequestInit) => {
+    received = init?.signal ?? undefined
+    return new Promise((_resolve, reject) => {
+      received?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+      })
+    })
+  }) as unknown as typeof fetch
+
+  try {
+    const controller = new AbortController()
+    const pending = importAgent(
+      { type: 'skill', url: 'https://raw.githubusercontent.com/x/y/main/SKILL.md' },
+      controller.signal
+    )
     assert.equal(received, controller.signal)
     controller.abort()
     await assert.rejects(pending, (err) => isAbortError(err))

@@ -26,7 +26,7 @@ import {
   type GroupMode
 } from '../components/agents/agents-utils'
 import { Refresh, TriangleAlert } from '../components/icons'
-import { ToastHost } from '../components/ui'
+import { AsyncStatusLine, ToastHost } from '../components/ui'
 import { useDebouncedValue, useToast } from '../hooks'
 import type { AgentDetail, AgentItem, AgentMeta, AgentType, AgentsResponse } from '../types'
 import { readSearchParam, updateSearchParams } from '../url'
@@ -78,6 +78,9 @@ export function AgentsPage() {
   const [rolling, setRolling] = useState(false)
   const [toggling, setToggling] = useState(false)
   const [seeding, setSeeding] = useState(false)
+  const [autoSeeding, setAutoSeeding] = useState(false)
+  const [seedStartedAt, setSeedStartedAt] = useState<number | null>(null)
+  const [seedError, setSeedError] = useState<string | null>(null)
   const [syncingGithub, setSyncingGithub] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -161,6 +164,9 @@ export function AgentsPage() {
       'seed-script-historical-grounding'
     ]
     if (requiredIds.every((id) => ids.has(id))) return
+    setAutoSeeding(true)
+    setSeedStartedAt(Date.now())
+    setSeedError(null)
     seedAgents()
       .then((res) => {
         if (res.created_total > 0) {
@@ -168,8 +174,10 @@ export function AgentsPage() {
           setDetailKey((key) => key + 1)
         }
       })
-      .catch(() => {
-        /* ignore background auto-seed errors; user can still trigger Seed manually */
+      .catch((err: unknown) => setSeedError(describeError(err)))
+      .finally(() => {
+        setAutoSeeding(false)
+        setSeedStartedAt(null)
       })
   }, [list, listLoading, debouncedQuery, includeInactive])
 
@@ -387,14 +395,16 @@ export function AgentsPage() {
 
   async function runSeed() {
     setSeeding(true)
-    setToolbarError(null)
+    setSeedStartedAt(Date.now())
+    setSeedError(null)
     try {
       const result = await seedAgents()
       notify(`Seed 完成：新增 ${result.created_total}，跳过 ${result.skipped_total}`)
       refreshAll()
     } catch (err) {
-      setToolbarError(describeError(err))
+      setSeedError(describeError(err))
     } finally {
+      setSeedStartedAt(null)
       setSeeding(false)
     }
   }
@@ -442,6 +452,30 @@ export function AgentsPage() {
           </p>
         </div>
       </header>
+
+      {(autoSeeding || seeding || seedError) && (
+        <div className="space-y-2">
+          {(autoSeeding || seeding) && (
+            <AsyncStatusLine
+              testId="agents-seed-status"
+              label={autoSeeding ? '正在准备内置 Agent 与技能定义' : '正在 Seed 内置 Agent 定义'}
+              startedAt={seedStartedAt}
+              stages={['读取内置清单', '写入缺失定义', '刷新列表']}
+              stage={0}
+              detail={autoSeeding ? '首次访问自动执行' : undefined}
+            />
+          )}
+          {seedError && !autoSeeding && !seeding && (
+            <AsyncStatusLine
+              testId="agents-seed-error"
+              label="内置 Agent 定义准备失败"
+              startedAt={null}
+              error={seedError}
+              onRetry={() => void runSeed()}
+            />
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-2 sm:gap-3" data-testid="agents-counts">
         {TYPES.map((type) => {

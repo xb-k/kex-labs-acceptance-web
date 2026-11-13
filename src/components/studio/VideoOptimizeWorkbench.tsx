@@ -164,6 +164,7 @@ export function VideoOptimizeWorkbench({
   const [samples, setSamples] = useState<OptimizeSampleItem[]>([])
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [uploadStartedAt, setUploadStartedAt] = useState<number | null>(null)
   const [uploadPct, setUploadPct] = useState(0)
   const [uploadError, setUploadError] = useState<string | null>(null)
 
@@ -227,6 +228,7 @@ export function VideoOptimizeWorkbench({
       }
       setUploadError(null)
       setUploading(true)
+      setUploadStartedAt(Date.now())
       setUploadPct(0)
       try {
         const created = await uploadVideoToOptimizeSession(picked, setUploadPct)
@@ -235,6 +237,7 @@ export function VideoOptimizeWorkbench({
       } catch (err) {
         setUploadError(err instanceof Error ? err.message : '视频上传或拆帧失败')
       } finally {
+        setUploadStartedAt(null)
         setUploading(false)
       }
     },
@@ -245,6 +248,7 @@ export function VideoOptimizeWorkbench({
     async (sampleKey: string) => {
       setUploadError(null)
       setUploading(true)
+      setUploadStartedAt(Date.now())
       setUploadPct(100)
       try {
         const created = await postJson<OptimizeSession>(
@@ -256,6 +260,7 @@ export function VideoOptimizeWorkbench({
       } catch (err) {
         setUploadError(err instanceof Error ? err.message : '载入示例视频失败')
       } finally {
+        setUploadStartedAt(null)
         setUploading(false)
       }
     },
@@ -503,6 +508,18 @@ export function VideoOptimizeWorkbench({
               )}
             </div>
           </div>
+        )}
+
+        {uploading && (
+          <AsyncStatusLine
+            className="mt-3"
+            testId="optimize-session-status"
+            label="正在创建优化会话"
+            startedAt={uploadStartedAt}
+            stages={['上传视频', 'ffprobe 规格检测', '抽取关键帧']}
+            stage={uploadPct < 100 ? 0 : 2}
+            detail={uploadPct < 100 ? `已上传 ${uploadPct}%` : '上传完成，正在抽帧'}
+          />
         )}
 
         {uploadError && (

@@ -8,6 +8,8 @@ import {
   canDeleteJob,
   formatJobDuration,
   galleryMeta,
+  IMAGE_WAIT_STAGES,
+  imageWaitStage,
   galleryPrimaryImage,
   galleryStatusLabel,
   imageActionState,
@@ -209,6 +211,16 @@ test('#140 删除请求与确认文案：URL 编码 id，文案含 id 与状态'
   assert.ok(canceled)
   assert.equal(canceled.url, '/api/studio/jobs/job%201%2F2')
   assert.match(canceled.description, /已取消/)
+})
+
+test('#136 图片等待阶段：提交 → 排队 → 生成 → 完成，失败停在生成并带后端错误', () => {
+  assert.deepEqual([...IMAGE_WAIT_STAGES], ['提交请求', '排队等待', '模型生成', '完成'])
+  assert.deepEqual(imageWaitStage(null), { stage: 1, label: '已提交，等待 studio 返回状态' })
+  assert.deepEqual(imageWaitStage('queued'), { stage: 1, label: '已入队，等待 GPU 排队' })
+  assert.deepEqual(imageWaitStage('running'), { stage: 2, label: '模型正在生成图片' })
+  assert.deepEqual(imageWaitStage('succeeded'), { stage: 3, label: '图片生成完成' })
+  assert.deepEqual(imageWaitStage('failed'), { stage: 2, label: '图片生成失败' })
+  assert.deepEqual(imageWaitStage('canceled'), { stage: 2, label: '图片任务已取消' })
 })
 
 test('封面 / 关键帧按钮 enable 条件：先选中图片', () => {

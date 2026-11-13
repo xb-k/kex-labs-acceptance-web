@@ -305,22 +305,29 @@ export function AsyncStatusLine({
   onCancel,
   detail,
   reducedMotion = false,
+  active = true,
+  elapsedMs: finalElapsedMs,
   testId,
   className
 }: {
   label: string
   startedAt: number | null | undefined
-  stages?: string[]
+  stages?: readonly string[]
   stage?: number
   error?: string | null
   onRetry?: () => void
   onCancel?: () => void
   detail?: string
   reducedMotion?: boolean
+  /** false 时停止呼吸动画并设 aria-busy=false（终态摘要仍可显示已用时长）。 */
+  active?: boolean
+  /** 终态一次性的总耗时；传入后不再每秒 tick。 */
+  elapsedMs?: number
   testId?: string
   className?: string
 }) {
-  const elapsedMs = useElapsed(startedAt)
+  const liveElapsedMs = useElapsed(active ? startedAt : null)
+  const shownElapsedMs = typeof finalElapsedMs === 'number' ? finalElapsedMs : liveElapsedMs
   const stageLabel =
     stages && stages.length > 0 && typeof stage === 'number'
       ? stages[Math.min(Math.max(stage, 0), stages.length - 1)]
@@ -329,13 +336,13 @@ export function AsyncStatusLine({
     stageLabel && stages && stages.length > 0
       ? `第 ${Math.min(Math.max(stage ?? 0, 0), stages.length - 1) + 1}/${stages.length} 步：${stageLabel}`
       : null
-  const animated = reducedMotion ? '' : 'animate-pulse motion-reduce:animate-none'
+  const animated = reducedMotion || !active ? '' : 'animate-pulse motion-reduce:animate-none'
 
   return (
     <div
       role="status"
       aria-live="polite"
-      aria-busy={!error}
+      aria-busy={!error && active}
       data-testid={testId ?? 'async-status-line'}
       data-reduced-motion={reducedMotion ? 'true' : undefined}
       className={`flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[10px] border border-black/[0.07] bg-white px-3 py-2 text-[11.5px] text-apple-text ${
@@ -346,9 +353,11 @@ export function AsyncStatusLine({
       <span className="font-medium">{label}</span>
       {stageText && <span className="text-apple-subtext">· {stageText}</span>}
       {detail && <span className="text-apple-subtext">· {detail}</span>}
-      <span className="num ml-auto text-apple-subtext" data-testid="async-elapsed">
-        已用 {formatElapsed(elapsedMs)}
-      </span>
+      {(startedAt != null || typeof finalElapsedMs === 'number') && (
+        <span className="num ml-auto text-apple-subtext" data-testid="async-elapsed">
+          已用 {formatElapsed(shownElapsedMs)}
+        </span>
+      )}
       {!error && onCancel && (
         <button
           type="button"

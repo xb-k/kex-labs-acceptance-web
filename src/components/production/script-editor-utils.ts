@@ -138,6 +138,18 @@ export const SYNC_INTERVAL_OPTIONS = [
   { value: '72', label: '每 72 小时' }
 ] as const
 
+/** #136 定时同步保存的等待文案：纯函数，便于断言不出现「保存中…」这类泛化文案。 */
+export function scheduleWaitLabel(patch: {
+  autoSyncEnabled?: boolean
+  intervalHours?: number
+}): string {
+  if (patch.autoSyncEnabled === false) return '正在切换为手动触发同步'
+  if (typeof patch.intervalHours === 'number') {
+    return `正在保存定时同步策略（每 ${patch.intervalHours} 小时）`
+  }
+  return '正在保存定时同步策略'
+}
+
 export type ScriptPreset = {
   id: string
   label: string
