@@ -78,6 +78,8 @@ export interface VideoOptimizeContext {
   readJson: (file: string) => any
   atomicWriteJson: (file: string, value: unknown) => void
   readBody: (req: IncomingMessage) => Promise<any>
+  /** Injected by api.ts so session writes reuse `authorizeTaskWrite`. */
+  authorizeWrite?: (req: IncomingMessage) => { ok: true } | { ok: false; status: number; error: string }
 }
 
 export const LOOK_PROFILES: Record<
@@ -318,47 +320,54 @@ function findSourceVideoPath(dir: string): string | null {
   return null
 }
 
+/**
+ * Samples are whatever real clips exist under `issue-19/<case>/out/`. No
+ * hard-coded demo entries or marketing copy: the label/description are derived
+ * from the file itself, and a data root without samples returns an empty list.
+ */
 function discoverSampleCandidates(dataRoot: string): Array<{ key: string; label: string; description: string; absPath: string; size_bytes: number }> {
-  const candidates: Array<{ key: string; label: string; relPath: string; description: string }> = [
-    {
-      key: 's0_preview',
-      label: '实拍街头花艺样片（720×1280 · 30fps）',
-      relPath: path.join('issue-19', 'b-track-s0', 'out', 's0_preview.mp4'),
-      description: '竖屏手持拍摄素材，适合测试 AI 镜头拆解、暗部降噪与 1080p 超分调色。'
-    },
-    {
-      key: 's1_enhanced',
-      label: '户外人物光影样片（720×1280 · 4s）',
-      relPath: path.join('issue-19', 'b-track-s1', 'out', 's1_enhanced.mp4'),
-      description: '测试暖调胶片风格对比与清晰度边界增强。'
-    },
-    {
-      key: 's2_graded',
-      label: '商业质感调色样片（s2_graded）',
-      relPath: path.join('issue-19', 'b-track-s2', 'out', 's2_graded.mp4'),
-      description: '测试多段构图分析与青橙对比优化。'
-    }
-  ]
-
   const out: Array<{ key: string; label: string; description: string; absPath: string; size_bytes: number }> = []
-  for (const item of candidates) {
-    const absPath = path.join(dataRoot, item.relPath)
+  const casesDir = path.join(dataRoot, 'issue-19')
+  let cases: fs.Dirent[]
+  try {
+    cases = fs.readdirSync(casesDir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+
+  const usedKeys = new Set<string>()
+  for (const entry of cases) {
+    if (!entry.isDirectory()) continue
+    const outDir = path.join(casesDir, entry.name, 'out')
+    let filenames: string[]
     try {
-      const stat = fs.statSync(absPath)
-      if (stat.isFile() && stat.size > 4096) {
+      filenames = fs.readdirSync(outDir)
+    } catch {
+      continue
+    }
+    for (const filename of filenames) {
+      if (!ALLOWED_VIDEO_EXTS.has(path.extname(filename).toLowerCase())) continue
+      const absPath = path.join(outDir, filename)
+      try {
+        const stat = fs.statSync(absPath)
+        if (!stat.isFile() || stat.size <= 4096) continue
+        const stem = path.basename(filename, path.extname(filename))
+        let key = stem
+        if (usedKeys.has(key)) key = `${entry.name}__${stem}`
+        usedKeys.add(key)
         out.push({
-          key: item.key,
-          label: item.label,
-          description: item.description,
+          key,
+          label: filename,
+          description: `磁盘真实样片 · ${(stat.size / 1024 / 1024).toFixed(2)} MB`,
           absPath,
           size_bytes: stat.size
         })
+      } catch {
+        /* ignore unreadable sample */
       }
-    } catch {
-      /* ignore missing sample */
     }
   }
-  return out
+  return out.sort((a, b) => a.absPath.localeCompare(b.absPath))
 }
 
 function parseRFrameRate(raw: unknown): number {
@@ -529,6 +538,15 @@ export async function handleVideoOptimizeRoute(
   if (pathname === '/api/optimize/session') {
     if (method !== 'POST') {
       ctx.sendJson(res, 405, { error: 'method not allowed' })
+      return true
+    }
+    const auth = ctx.authorizeWrite?.(req)
+    if (!auth) {
+      ctx.sendJson(res, 403, { error: 'session write authorization is not wired' })
+      return true
+    }
+    if (!auth.ok) {
+      ctx.sendJson(res, auth.status, { error: auth.error })
       return true
     }
 

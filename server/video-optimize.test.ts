@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { promisify } from 'node:util'
+import { authorizeTaskWrite } from './api'
 import {
   buildFfmpegVideoFilter,
   handleVideoOptimizeRoute,
@@ -78,7 +79,8 @@ before(async () => {
       sendJson,
       readJson,
       atomicWriteJson,
-      readBody
+      readBody,
+      authorizeWrite: (r) => authorizeTaskWrite(r)
     })
     if (!handled) {
       sendJson(res, 404, { error: 'not found' })
@@ -144,7 +146,10 @@ test('Rail B session ingest, frame serving, real ffmpeg beautify, and Range/down
   assert.equal(samplesJson.items.some((s) => s.key === 's0_preview'), true)
 
   // 2. Create session from sample
-  const createRes = await fetch(`${base}/api/optimize/session?sample=s0_preview`, { method: 'POST' })
+  const createRes = await fetch(`${base}/api/optimize/session?sample=s0_preview`, {
+    method: 'POST',
+    headers: { Origin: base }
+  })
   assert.equal(createRes.status, 201)
   const session = (await createRes.json()) as OptimizeSession
   assert.match(session.id, /^opt-[a-z0-9]+$/)
@@ -200,4 +205,72 @@ test('Rail B session ingest, frame serving, real ffmpeg beautify, and Range/down
   assert.match(rangeRes.headers.get('content-range') ?? '', /^bytes 0-127\//)
   const chunk = await rangeRes.arrayBuffer()
   assert.equal(chunk.byteLength, 128)
+})
+
+async function callSamplesRoute(dataRoot: string): Promise<{ status: number; body: any }> {
+  let captured = { status: 0, body: null as any }
+  const req = {
+    method: 'GET',
+    url: '/api/optimize/samples',
+    headers: {}
+  } as unknown as http.IncomingMessage
+  const res = { statusCode: 0, setHeader() {}, end() {} } as unknown as http.ServerResponse
+  await handleVideoOptimizeRoute(req, res, new URL('http://127.0.0.1/api/optimize/samples'), '/api/optimize/samples', {
+    dataRoot,
+    sendJson: (_res, status, body) => {
+      captured = { status, body }
+    },
+    readJson,
+    atomicWriteJson,
+    readBody,
+    authorizeWrite: (r) => authorizeTaskWrite(r)
+  })
+  return captured
+}
+
+test('GET /api/optimize/samples only lists real disk files and returns items:[] when empty', async () => {
+  const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kex-optimize-empty-'))
+  try {
+    const empty = await callSamplesRoute(emptyRoot)
+    assert.equal(empty.status, 200)
+    assert.deepEqual(empty.body, { items: [] })
+  } finally {
+    fs.rmSync(emptyRoot, { recursive: true, force: true })
+  }
+
+  const real = await callSamplesRoute(root)
+  assert.equal(real.status, 200)
+  assert.ok(real.body.items.length >= 1)
+  assert.equal(real.body.items.some((s: any) => s.key === 's0_preview'), true)
+  for (const item of real.body.items) {
+    assert.match(item.filename, /\.mp4$/)
+    assert.doesNotMatch(item.label, /demo|示例|mock/i)
+    assert.match(item.description, /^磁盘真实样片/)
+  }
+})
+
+test('POST /api/optimize/session requires same-origin or a valid X-Web-Token', async () => {
+  const savedToken = process.env.WEB_WRITE_TOKEN
+  try {
+    delete process.env.WEB_WRITE_TOKEN
+    const crossOrigin = await fetch(`${base}/api/optimize/session`, {
+      method: 'POST',
+      headers: { Origin: 'http://evil.example' }
+    })
+    assert.equal(crossOrigin.status, 403)
+    const forbidden = (await crossOrigin.json()) as any
+    assert.match(String(forbidden.error), /same-origin|X-Web-Token/)
+
+    process.env.WEB_WRITE_TOKEN = 'optimize-token'
+    const wrongToken = await fetch(`${base}/api/optimize/session`, {
+      method: 'POST',
+      headers: { Origin: 'http://evil.example', 'X-Web-Token': 'wrong' }
+    })
+    assert.equal(wrongToken.status, 401)
+    const unauthorized = (await wrongToken.json()) as any
+    assert.match(String(unauthorized.error), /X-Web-Token/)
+  } finally {
+    if (savedToken === undefined) delete process.env.WEB_WRITE_TOKEN
+    else process.env.WEB_WRITE_TOKEN = savedToken
+  }
 })

@@ -19,7 +19,19 @@ const GEMINI_MODEL = 'gemini-4-hydrogen'
 const MAX_RETRIES = 2
 const OLLAMA_DEFAULT_URL = 'http://127.0.0.1:11434'
 const OLLAMA_DEFAULT_TEXT_MODEL = 'qwen2vl:7b-q4'
+const OLLAMA_DEFAULT_VLM_MODEL = 'qwen2vl:7b-q4'
 const OLLAMA_SCRIPT_TIMEOUT_MS = 60_000
+const OLLAMA_VLM_TIMEOUT_MS = 90_000
+
+const FRAME_ANALYSIS_SYSTEM_INSTRUCTION = [
+  '你是 Kex Labs 视频工作台的 AI 影像分析与调色美化专家。',
+  '请仔细查看从同一段视频按时间抽取的多个关键帧画面，完成逐帧镜头拆解、画质瑕疵诊断，并给出最适配的 FFmpeg 美化调色参数。',
+  '可选 recommended_profile 仅限：natural_clarity（中性纪实通透）、teal_orange（电影青橙商业）、warm_film（温暖胶片肤色）、landscape_vivid（风景建筑高锐）。',
+  '参数范围约束：denoise(0..100)、sharpen(0..100)、contrast(-30..40)、brightness(-20..25)、saturation(-30..50)、warmth(-30..30)。',
+  '请务必用专业、具体、简洁的中文描述每个关键帧的真实视觉内容。',
+  '只输出一个 JSON 对象，不要 markdown 代码块或额外解释。字段必须为：',
+  '{"overall_assessment": string, "recommended_profile": "natural_clarity|teal_orange|warm_film|landscape_vivid", "recommended_profile_reason": string, "recommended_params": {"denoise": number, "sharpen": number, "contrast": number, "brightness": number, "saturation": number, "warmth": number, "upscale_1080p": boolean, "smooth_30fps": boolean}, "shots": [{"frame_index": number, "timecode": string, "shot_type": string, "subject": string, "lighting_color": string, "flaw_diagnosis": string, "enhance_action": string}]}'
+].join('\n')
 
 export interface ScriptSceneOutput {
   scene_no: number
@@ -491,6 +503,47 @@ export function normalizeFrameAnalysis(
   }
 }
 
+function completeFrameAnalysis(
+  ctx: GeminiRouteContext,
+  res: ServerResponse,
+  sessionId: string,
+  model: string,
+  started: number,
+  parsed: Record<string, unknown>,
+  fallbackFrames: Array<{ index: number; timecode: string }>
+): void {
+  const analysis = normalizeFrameAnalysis(parsed, fallbackFrames)
+
+  // Persist AI analysis back to session.json if linked to an optimize session
+  if (sessionId && isValidSessionId(sessionId) && ctx.dataRoot && ctx.readJson && ctx.atomicWriteJson) {
+    const sessionFile = path.join(ctx.dataRoot, 'optimize-sessions', sessionId, 'session.json')
+    const existing = ctx.readJson(sessionFile)
+    if (existing) {
+      ctx.atomicWriteJson(sessionFile, {
+        ...existing,
+        updated_at: new Date().toISOString(),
+        ai_analysis: analysis
+      })
+    }
+  }
+
+  ctx.sendJson(res, 200, {
+    model,
+    elapsed_ms: Date.now() - started,
+    analysis
+  })
+}
+
+function sendLlmUnavailable(ctx: GeminiRouteContext, res: ServerResponse, err: unknown): void {
+  const detail = err instanceof Error ? err.message : String(err)
+  console.error(`[gemini] POST /api/gemini/analyze-frames -> 503 llm_unavailable (${detail})`)
+  ctx.sendJson(res, 503, {
+    error: 'llm_unavailable',
+    message: '本地 Ollama VLM 与 Gemini 均不可用，请检查 OLLAMA_URL/OLLAMA_VLM_MODEL 或配置 GEMINI_API_KEY。',
+    detail
+  })
+}
+
 async function handleAnalyzeFrames(
   req: IncomingMessage,
   res: ServerResponse,
@@ -564,22 +617,27 @@ async function handleAnalyzeFrames(
     return true
   }
 
-  const ai = createGeminiClient()
-  if (!ai) {
-    ctx.sendJson(res, 503, {
-      error: 'gemini_unavailable',
-      message: '未检测到服务端 GEMINI_API_KEY 配置，请在 Settings > Secrets 中配置后再调用 AI 拆画分析。'
-    })
+  const started = Date.now()
+
+  // #124/#127: local VLM is the default; an explicit Gemini backend still
+  // falls back to Ollama if the upstream call fails, and only then reports 503.
+  if (resolveAnalyzeFramesBackend() === 'ollama') {
+    try {
+      const result = await requestOllamaFrameAnalysis(framesInput, videoSummary)
+      completeFrameAnalysis(ctx, res, sessionId, result.model, started, result.parsed, framesInput)
+    } catch (err) {
+      sendLlmUnavailable(ctx, res, err)
+    }
     return true
   }
 
-  const systemInstruction = [
-    '你是 Kex Labs 视频工作台的 AI 影像分析与调色美化专家。',
-    '请仔细查看从同一段视频按时间抽取的多个关键帧画面，完成逐帧镜头拆解、画质瑕疵诊断，并给出最适配的 FFmpeg 美化调色参数。',
-    '可选 recommended_profile 仅限：natural_clarity（中性纪实通透）、teal_orange（电影青橙商业）、warm_film（温暖胶片肤色）、landscape_vivid（风景建筑高锐）。',
-    '参数范围约束：denoise(0..100)、sharpen(0..100)、contrast(-30..40)、brightness(-20..25)、saturation(-30..50)、warmth(-30..30)。',
-    '请务必用专业、具体、简洁的中文描述每个关键帧的真实视觉内容。'
-  ].join('\n')
+  const ai = createGeminiClient()
+  if (!ai) {
+    sendLlmUnavailable(ctx, res, new Error('GEMINI_API_KEY is not configured'))
+    return true
+  }
+
+  const systemInstruction = FRAME_ANALYSIS_SYSTEM_INSTRUCTION
 
   const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
     {
@@ -596,7 +654,6 @@ async function handleAnalyzeFrames(
     })
   }
 
-  const started = Date.now()
   let lastError: unknown = null
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
@@ -670,26 +727,7 @@ async function handleAnalyzeFrames(
       const rawText = (response.text ?? '').trim()
       if (!rawText) throw new Error('Gemini 未返回有效画面分析结果')
       const parsed = JSON.parse(rawText) as Record<string, unknown>
-      const analysis = normalizeFrameAnalysis(parsed, framesInput)
-
-      // Persist AI analysis back to session.json if linked to an optimize session
-      if (sessionId && isValidSessionId(sessionId) && ctx.dataRoot && ctx.readJson && ctx.atomicWriteJson) {
-        const sessionFile = path.join(ctx.dataRoot, 'optimize-sessions', sessionId, 'session.json')
-        const existing = ctx.readJson(sessionFile)
-        if (existing) {
-          ctx.atomicWriteJson(sessionFile, {
-            ...existing,
-            updated_at: new Date().toISOString(),
-            ai_analysis: analysis
-          })
-        }
-      }
-
-      ctx.sendJson(res, 200, {
-        model: GEMINI_MODEL,
-        elapsed_ms: Date.now() - started,
-        analysis
-      })
+      completeFrameAnalysis(ctx, res, sessionId, GEMINI_MODEL, started, parsed, framesInput)
       return true
     } catch (err) {
       lastError = err
@@ -702,11 +740,18 @@ async function handleAnalyzeFrames(
   }
 
   const normalized = normalizeGeminiError(lastError)
-  console.error(`[gemini] POST /api/gemini/analyze-frames -> ${normalized.status} (${normalized.code})`)
-  ctx.sendJson(res, normalized.status, {
-    error: normalized.code,
-    message: normalized.message
-  })
+  try {
+    const result = await requestOllamaFrameAnalysis(framesInput, videoSummary)
+    completeFrameAnalysis(ctx, res, sessionId, result.model, started, result.parsed, framesInput)
+  } catch (ollamaErr) {
+    sendLlmUnavailable(
+      ctx,
+      res,
+      new Error(
+        `${normalized.code}: ${normalized.message}; Ollama: ${ollamaErr instanceof Error ? ollamaErr.message : String(ollamaErr)}`
+      )
+    )
+  }
   return true
 }
 
@@ -808,6 +853,70 @@ function resolveOllamaTextModel(): string {
   return process.env.OLLAMA_TEXT_MODEL?.trim() || OLLAMA_DEFAULT_TEXT_MODEL
 }
 
+function resolveOllamaVlmModel(): string {
+  return process.env.OLLAMA_VLM_MODEL?.trim() || OLLAMA_DEFAULT_VLM_MODEL
+}
+
+/**
+ * Local VLM is the default for frame analysis. Gemini is opt-in only when
+ * `WEB_LLM_BACKEND=gemini` **and** a key is configured.
+ */
+export function resolveAnalyzeFramesBackend(env: NodeJS.ProcessEnv = process.env): 'ollama' | 'gemini' {
+  const backend = (env.WEB_LLM_BACKEND ?? '').trim().toLowerCase()
+  return backend === 'gemini' && Boolean(env.GEMINI_API_KEY?.trim()) ? 'gemini' : 'ollama'
+}
+
+function buildFrameAnalysisPrompt(
+  videoSummary: string,
+  framesInput: Array<{ index: number; timecode: string }>
+): string {
+  return [
+    FRAME_ANALYSIS_SYSTEM_INSTRUCTION,
+    `视频基本信息：${videoSummary}。以下共 ${framesInput.length} 张按时间顺序抽取的关键帧图片（依次对应第 ${framesInput.map((f) => `${f.index} 帧 ${f.timecode}`).join('、')}），请逐帧分析并输出完整 JSON：`
+  ].join('\n\n')
+}
+
+async function requestOllamaFrameAnalysis(
+  framesInput: Array<{ index: number; timecode: string; base64: string; mimeType: string }>,
+  videoSummary: string
+): Promise<{ model: string; parsed: Record<string, unknown> }> {
+  const url = resolveOllamaUrl()
+  const model = resolveOllamaVlmModel()
+  let res: Response
+  try {
+    res = await fetch(`${url}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        prompt: buildFrameAnalysisPrompt(videoSummary, framesInput),
+        images: framesInput.map((f) => f.base64),
+        stream: false,
+        format: 'json',
+        options: { temperature: 0.2 }
+      }),
+      signal: AbortSignal.timeout(OLLAMA_VLM_TIMEOUT_MS)
+    })
+  } catch (err) {
+    throw new Error(`Ollama VLM unreachable at ${url}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (!res.ok) throw new Error(`Ollama VLM HTTP ${res.status}`)
+
+  const body = (await res.json()) as { response?: unknown }
+  const text = String(body.response ?? '').trim()
+  if (!text) throw new Error('Ollama VLM returned an empty response')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('Ollama VLM response is not valid JSON')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Ollama VLM response is not a JSON object')
+  }
+  return { model, parsed: parsed as Record<string, unknown> }
+}
+
 /**
  * Local-model fallback for script generation when no Gemini key is configured
  * (or the Gemini call fails). Uses Ollama's JSON mode and parses the structured
@@ -895,6 +1004,15 @@ export async function handleGeminiRoute(
       res.statusCode = 405
       res.setHeader('Allow', 'POST')
       res.end()
+      return true
+    }
+    const auth = ctx.authorizeWrite?.(req)
+    if (!auth) {
+      ctx.sendJson(res, 403, { error: 'script template write authorization is not wired' })
+      return true
+    }
+    if (!auth.ok) {
+      ctx.sendJson(res, auth.status, { error: auth.error })
       return true
     }
     let body: unknown = {}
@@ -1032,6 +1150,15 @@ export async function handleGeminiRoute(
       res.statusCode = 405
       res.setHeader('Allow', 'PATCH, POST')
       res.end()
+      return true
+    }
+    const auth = ctx.authorizeWrite?.(req)
+    if (!auth) {
+      ctx.sendJson(res, 403, { error: 'script template write authorization is not wired' })
+      return true
+    }
+    if (!auth.ok) {
+      ctx.sendJson(res, auth.status, { error: auth.error })
       return true
     }
     let body: unknown = {}

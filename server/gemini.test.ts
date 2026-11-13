@@ -9,6 +9,7 @@ import {
   isRetryableGeminiError,
   normalizeFrameAnalysis,
   normalizeGeneratedScript,
+  resolveAnalyzeFramesBackend,
   resolveUseHistoricalGrounding
 } from './gemini'
 import { formatHistoricalKnowledgeBrief, matchHistoricalKnowledge } from './historical-kb'
@@ -388,29 +389,65 @@ const SCRIPT_JSON = {
   ]
 }
 
+const FRAME_ANALYSIS_JSON = {
+  overall_assessment: '晨光稳定，暗部细节可再提升。',
+  recommended_profile: 'natural_clarity',
+  recommended_profile_reason: '纪实素材优先保留肤色与真实白平衡。',
+  recommended_params: {
+    denoise: 30,
+    sharpen: 40,
+    contrast: 8,
+    brightness: 2,
+    saturation: 6,
+    warmth: 0,
+    upscale_1080p: true,
+    smooth_30fps: true
+  },
+  shots: [
+    {
+      frame_index: 1,
+      timecode: '00:00.0',
+      shot_type: '中景 · 自然视角',
+      subject: '护士靠在车窗边',
+      lighting_color: '清晨冷调侧光',
+      flaw_diagnosis: '暗部轻微噪点',
+      enhance_action: '轻度降噪后提升中间调反差'
+    }
+  ]
+}
+
 const SAME_ORIGIN_HEADERS = { host: '127.0.0.1:8088', origin: 'http://127.0.0.1:8088' }
 const savedEnv = {
   gemini: process.env.GEMINI_API_KEY,
   ollama: process.env.OLLAMA_URL,
   model: process.env.OLLAMA_TEXT_MODEL,
+  vlmModel: process.env.OLLAMA_VLM_MODEL,
+  backend: process.env.WEB_LLM_BACKEND,
   token: process.env.WEB_WRITE_TOKEN
 }
 
 beforeEach(() => {
   delete process.env.GEMINI_API_KEY
   delete process.env.WEB_WRITE_TOKEN
+  delete process.env.WEB_LLM_BACKEND
   process.env.OLLAMA_URL = 'http://127.0.0.1:11499'
   process.env.OLLAMA_TEXT_MODEL = 'script-test-model'
+  process.env.OLLAMA_VLM_MODEL = 'vlm-test-model'
 })
 
 after(() => {
-  const restore = (key: 'GEMINI_API_KEY' | 'OLLAMA_URL' | 'OLLAMA_TEXT_MODEL' | 'WEB_WRITE_TOKEN', value?: string) => {
+  const restore = (
+    key: 'GEMINI_API_KEY' | 'OLLAMA_URL' | 'OLLAMA_TEXT_MODEL' | 'OLLAMA_VLM_MODEL' | 'WEB_LLM_BACKEND' | 'WEB_WRITE_TOKEN',
+    value?: string
+  ) => {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
   }
   restore('GEMINI_API_KEY', savedEnv.gemini)
   restore('OLLAMA_URL', savedEnv.ollama)
   restore('OLLAMA_TEXT_MODEL', savedEnv.model)
+  restore('OLLAMA_VLM_MODEL', savedEnv.vlmModel)
+  restore('WEB_LLM_BACKEND', savedEnv.backend)
   restore('WEB_WRITE_TOKEN', savedEnv.token)
 })
 
@@ -426,6 +463,29 @@ async function callScript(
   } as unknown as IncomingMessage
   const res = { statusCode: 0, setHeader() {}, end() {} } as unknown as ServerResponse
   const handled = await handleGeminiRoute(req, res, '/api/gemini/script', {
+    sendJson: (_res, status, payload) => {
+      captured = { status, body: payload }
+    },
+    readBody: async () => body,
+    authorizeWrite: (r: IncomingMessage) => authorizeTaskWrite(r)
+  })
+  return { handled, ...captured }
+}
+
+async function callGeminiPath(
+  pathname: string,
+  method: string,
+  body: unknown,
+  headers: Record<string, string> = SAME_ORIGIN_HEADERS
+): Promise<{ handled: boolean; status: number; body: any }> {
+  let captured: { status: number; body: any } = { status: 0, body: null }
+  const req = {
+    method,
+    url: pathname,
+    headers
+  } as unknown as IncomingMessage
+  const res = { statusCode: 0, setHeader() {}, end() {} } as unknown as ServerResponse
+  const handled = await handleGeminiRoute(req, res, pathname, {
     sendJson: (_res, status, payload) => {
       captured = { status, body: payload }
     },
@@ -544,4 +604,122 @@ test('POST /api/gemini/script rejects a cross-origin caller without token with 4
   )
   assert.equal(res.status, 403)
   assert.match(String(res.body.error), /same-origin|X-Web-Token/)
+})
+
+// ---------------------------------------------------------------------------
+// #124/#127 POST /api/gemini/analyze-frames: local Ollama VLM by default,
+// Gemini only behind WEB_LLM_BACKEND=gemini + key, no fabricated analysis.
+// ---------------------------------------------------------------------------
+
+const FRAMES_BODY = { frames: [{ index: 1, timecode: '00:00.0', base64: 'aGVsbG8=', mimeType: 'image/jpeg' }] }
+
+test('analyze-frames defaults to Ollama VLM JSON mode with base64 images', async () => {
+  const realFetch = globalThis.fetch
+  const seen: Array<{ url: string; body: any }> = []
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push({ url: requestUrl(input), body: JSON.parse(String(init?.body ?? '{}')) })
+    return new Response(JSON.stringify({ model: 'vlm-test-model', response: JSON.stringify(FRAME_ANALYSIS_JSON) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+  }) as typeof fetch
+  try {
+    assert.equal(resolveAnalyzeFramesBackend(), 'ollama')
+    const res = await callGeminiPath('/api/gemini/analyze-frames', 'POST', FRAMES_BODY)
+    assert.equal(res.status, 200)
+    assert.equal(res.body.model, 'vlm-test-model')
+    assert.equal(res.body.analysis.recommended_profile, 'natural_clarity')
+    assert.equal(res.body.analysis.shots.length, 1)
+
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].url, 'http://127.0.0.1:11499/api/generate')
+    assert.equal(seen[0].body.model, 'vlm-test-model')
+    assert.equal(seen[0].body.format, 'json')
+    assert.equal(seen[0].body.stream, false)
+    assert.deepEqual(seen[0].body.images, ['aGVsbG8='])
+    assert.match(seen[0].body.prompt, /JSON/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('analyze-frames returns 503 llm_unavailable instead of fake analysis when Ollama VLM is down', async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async () => {
+    throw new Error('ECONNREFUSED 127.0.0.1:11499')
+  }) as typeof fetch
+  try {
+    const res = await callGeminiPath('/api/gemini/analyze-frames', 'POST', FRAMES_BODY)
+    assert.equal(res.status, 503)
+    assert.equal(res.body.error, 'llm_unavailable')
+    assert.match(String(res.body.detail), /Ollama VLM/)
+    assert.equal('analysis' in res.body, false)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('WEB_LLM_BACKEND=gemini + key uses Gemini; without a key it stays on Ollama', async () => {
+  process.env.WEB_LLM_BACKEND = 'gemini'
+  assert.equal(resolveAnalyzeFramesBackend(), 'ollama')
+
+  process.env.GEMINI_API_KEY = 'test-gemini-key'
+  assert.equal(resolveAnalyzeFramesBackend(), 'gemini')
+
+  const realFetch = globalThis.fetch
+  const calls: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(requestUrl(input))
+    return new Response(
+      JSON.stringify({
+        candidates: [{ content: { role: 'model', parts: [{ text: JSON.stringify(FRAME_ANALYSIS_JSON) }] } }]
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    )
+  }) as typeof fetch
+  try {
+    const res = await callGeminiPath('/api/gemini/analyze-frames', 'POST', FRAMES_BODY)
+    assert.equal(res.status, 200)
+    assert.equal(res.body.model, 'gemini-4-hydrogen')
+    assert.match(calls[0], /generativelanguage\.googleapis\.com/)
+    assert.equal(calls.some((u) => u.includes('/api/generate')), false)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('POST /api/gemini/script-templates/sync rejects 401 wrong token and 403 cross-origin', async () => {
+  process.env.WEB_WRITE_TOKEN = 'template-write-token'
+  const wrong = await callGeminiPath('/api/gemini/script-templates/sync', 'POST', {}, {
+    host: '127.0.0.1:8088',
+    origin: 'http://evil.example',
+    'x-web-token': 'wrong'
+  })
+  assert.equal(wrong.status, 401)
+  assert.match(String(wrong.body.error), /X-Web-Token/)
+
+  delete process.env.WEB_WRITE_TOKEN
+  const crossOrigin = await callGeminiPath('/api/gemini/script-templates/sync', 'POST', {}, {
+    host: '127.0.0.1:8088',
+    origin: 'http://evil.example'
+  })
+  assert.equal(crossOrigin.status, 403)
+  assert.match(String(crossOrigin.body.error), /same-origin|X-Web-Token/)
+})
+
+test('POST /api/gemini/script-templates/schedule rejects 401 wrong token and 403 cross-origin', async () => {
+  process.env.WEB_WRITE_TOKEN = 'template-write-token'
+  const wrong = await callGeminiPath('/api/gemini/script-templates/schedule', 'POST', {}, {
+    host: '127.0.0.1:8088',
+    origin: 'http://evil.example',
+    'x-web-token': 'wrong'
+  })
+  assert.equal(wrong.status, 401)
+
+  delete process.env.WEB_WRITE_TOKEN
+  const crossOrigin = await callGeminiPath('/api/gemini/script-templates/schedule', 'POST', {}, {
+    host: '127.0.0.1:8088',
+    origin: 'http://evil.example'
+  })
+  assert.equal(crossOrigin.status, 403)
 })
