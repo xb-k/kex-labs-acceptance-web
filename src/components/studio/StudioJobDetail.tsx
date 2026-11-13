@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { formatSizeBytes, formatStamp } from '../../format'
+import { formatJobDuration } from '../../image-workbench'
 import type { StudioAsset, StudioBrief, StudioJob, StudioJobSummary } from '../../types'
 
 const QC: Record<StudioJob['qc']['status'], { label: string; className: string }> = {
@@ -95,6 +96,10 @@ export function StudioJobDetail({
               <dd className="num">{formatStamp(detail.created_at, true)}</dd>
               <dt className="text-apple-subtext">更新</dt>
               <dd className="num">{formatStamp(detail.updated_at, true)}</dd>
+              <dt className="text-apple-subtext">耗时</dt>
+              <dd className="num" data-testid="studio-job-duration">
+                {formatJobDuration(job.duration_ms)}
+              </dd>
             </dl>
           </DetailSection>
 

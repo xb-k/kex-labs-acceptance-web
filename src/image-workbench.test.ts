@@ -249,6 +249,7 @@ function imageJob(status: StudioJobStatus): StudioJob {
     updated_at: '2026-11-14T00:00:00Z',
     error: status === 'failed' ? '模型显存不足' : null,
     stage: null,
+    duration_ms: 203994,
     plan_id: null,
     model: null,
     inputs: [],

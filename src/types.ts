@@ -986,6 +986,8 @@ export type StudioJobSummary = {
   updated_at: string
   error: string | null
   stage: string | null
+  /** #154: 真实耗时（ms）；null 时展示「耗时未记录」。 */
+  duration_ms: number | null
 }
 
 /** #89b: 产物引用（绝不暴露 studio 绝对路径，`url` 一律走 /api 代理）。 */

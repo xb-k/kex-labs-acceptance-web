@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { GateStatus, JobsResponse, StudioJobsResponse, StudioJobStatus } from '../types'
+import type { GateStatus, JobsResponse, StudioJobsResponse, StudioJobStatus, StudioJobSummary } from '../types'
 import { useJson, useLiveJson } from '../api'
 import { Link } from '../router'
 import { StatusChip } from '../components/StatusChip'
@@ -8,6 +8,7 @@ import { SnapshotStatusStage } from '../components/SnapshotStatusStage'
 import { ChevronRight, Clapper, Film, Refresh } from '../components/icons'
 import { formatResolution, formatStamp } from '../format'
 import { jobIdDisplay, jobReadable, matchesJobQuery } from '../job-label'
+import { formatJobDuration } from '../image-workbench'
 import { readSearchParam, updateSearchParams } from '../url'
 import { SelectMenu } from '../components/SelectMenu'
 import { FilterChipGroup } from '../components/ui'
@@ -47,6 +48,45 @@ const STUDIO_STATUS_RANK: Record<StudioJobStatus, number> = {
   queued: 2,
   succeeded: 3,
   canceled: 4
+}
+
+/** #154: /jobs 工坊任务行主体（不含 Link 外壳），导出以便 SSR 断言耗时展示。 */
+export function StudioJobRowContent({ job }: { job: StudioJobSummary }) {
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span
+          className="min-w-0 flex-1 truncate text-[13px] font-medium"
+          title={`${jobReadable(job)}（任务 ID ${job.id}）`}
+        >
+          {jobReadable(job)}
+        </span>
+        <span className="shrink-0 text-[11px] font-medium text-apple-blueInk">{job.rail} 轨</span>
+        <span data-testid={`snapshot-status-${job.id}`} data-snapshot-status={job.status}>
+          <StudioStatusChip status={job.status} />
+        </span>
+      </div>
+      <p className="mt-1 break-words text-[11px] leading-relaxed text-apple-subtext">
+        <span className="num" title={job.id} data-job-id={job.id}>
+          {jobIdDisplay(job.id)}
+        </span>{' '}
+        · {formatStamp(job.created_at)} · Brief <span className="num">{job.brief_id ?? '—'}</span>
+        {' · '}
+        <span
+          data-testid={`snapshot-stage-${job.id}`}
+          data-snapshot-stage={job.stage ?? ''}
+          title={job.stage ? `阶段 ${job.stage}` : '阶段不可用：studio 未返回 stage'}
+        >
+          {job.stage ? `阶段 ${job.stage}` : '阶段 —'}
+        </span>
+        {' · '}
+        <span className="num" data-testid={`studio-job-duration-${job.id}`}>
+          {formatJobDuration(job.duration_ms)}
+        </span>
+        {job.error ? ` · ${job.error}` : ''}
+      </p>
+    </div>
+  )
 }
 
 /** 创作工坊 tab：只在挂载时轮询；切回 B 轨即卸载并停止请求。 */
@@ -233,38 +273,7 @@ function StudioJobsTab({ query }: { query: string }) {
                     to={`/studio?job=${encodeURIComponent(job.id)}`}
                     className="flex min-w-0 items-center gap-3 px-4 py-3 transition-colors hover:bg-black/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-apple-blue/50"
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                        <span
-                          className="min-w-0 flex-1 truncate text-[13px] font-medium"
-                          title={`${jobReadable(job)}（任务 ID ${job.id}）`}
-                        >
-                          {jobReadable(job)}
-                        </span>
-                        <span className="shrink-0 text-[11px] font-medium text-apple-blueInk">
-                          {job.rail} 轨
-                        </span>
-                        <span data-testid={`snapshot-status-${job.id}`} data-snapshot-status={job.status}>
-                          <StudioStatusChip status={job.status} />
-                        </span>
-                      </div>
-                      <p className="mt-1 break-words text-[11px] leading-relaxed text-apple-subtext">
-                        <span className="num" title={job.id} data-job-id={job.id}>
-                          {jobIdDisplay(job.id)}
-                        </span>{' '}
-                        · {formatStamp(job.created_at)} · Brief{' '}
-                        <span className="num">{job.brief_id ?? '—'}</span>
-                        {' · '}
-                        <span
-                          data-testid={`snapshot-stage-${job.id}`}
-                          data-snapshot-stage={job.stage ?? ''}
-                          title={job.stage ? `阶段 ${job.stage}` : '阶段不可用：studio 未返回 stage'}
-                        >
-                          {job.stage ? `阶段 ${job.stage}` : '阶段 —'}
-                        </span>
-                        {job.error ? ` · ${job.error}` : ''}
-                      </p>
-                    </div>
+                    <StudioJobRowContent job={job} />
                     <ChevronRight className="h-3.5 w-3.5 shrink-0 text-apple-subtext" aria-hidden="true" />
                   </Link>
                 </li>

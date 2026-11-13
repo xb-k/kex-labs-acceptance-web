@@ -38,8 +38,8 @@ const SAMPLE_TASKS: PlanTask[] = [
 ]
 
 const SAMPLE_STUDIO_JOBS: StudioJobSummary[] = [
-  { id: 'st-1', type: 'aigc', rail: 'A', status: 'succeeded', brief_id: null, created_at: '2026-11-13T10:00:00Z', updated_at: '2026-11-13T10:05:00Z', error: null, stage: 'F' },
-  { id: 'st-2', type: 'optimize', rail: 'B', status: 'running', brief_id: null, created_at: '2026-11-13T11:00:00Z', updated_at: '2026-11-13T11:02:00Z', error: null, stage: 'D' }
+  { id: 'st-1', type: 'aigc', rail: 'A', status: 'succeeded', brief_id: null, created_at: '2026-11-13T10:00:00Z', updated_at: '2026-11-13T10:05:00Z', error: null, stage: 'F', duration_ms: 300000 },
+  { id: 'st-2', type: 'optimize', rail: 'B', status: 'running', brief_id: null, created_at: '2026-11-13T11:00:00Z', updated_at: '2026-11-13T11:02:00Z', error: null, stage: 'D', duration_ms: null }
 ]
 
 test('buildDailyEfficiencyData computes bounded completion rates and stage/agent trends from live state', () => {
