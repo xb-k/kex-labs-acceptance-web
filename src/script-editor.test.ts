@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  applyTemplateItemUpdate,
   buildExportMarkdown,
   buildExportPlainText,
   CANONICAL_DURATION_OPTIONS,
@@ -10,14 +11,16 @@ import {
   mergePromptTemplates,
   normalizeAgentProfileId,
   resolveHistoricalGroundingActive,
+  resolveScriptTemplateLibrary,
   sanitizeExportFilename,
   scheduleWaitLabel,
   SCRIPT_PRESETS,
   STORY_ERA_OPTIONS,
   SYNC_INTERVAL_OPTIONS,
+  templateSourceBadge,
   toBriefPolishedFromGenerated
 } from './components/production/script-editor-utils'
-import type { AgentItem, GeminiGeneratedScript } from './types'
+import type { AgentItem, GeminiGeneratedScript, ScriptPromptTemplateInfo } from './types'
 
 const SAMPLE_SCRIPT: GeminiGeneratedScript = {
   title: '晨光手冲 · 十五秒商业短片',
@@ -187,4 +190,56 @@ test('toBriefPolishedFromGenerated maps AI video_prompt and scenes into valid St
   assert.match(polished.shots[0].camera ?? '', /特写 · 50mm/)
   assert.match(polished.shots[0].prompt, /Close-up 50mm prime/)
   assert.match(polished.shots[0].prompt, /晨光穿过百叶窗/)
+})
+
+// #134 模板库接线：新接口优先 → 旧接口回退 → 随库静态列表。
+test('#134 resolveScriptTemplateLibrary prefers /api/script-templates, then legacy, then static defaults', () => {
+  const apiItem: ScriptPromptTemplateInfo = {
+    ...getScriptPromptTemplate('marketing'),
+    label: '新接口标签',
+    source: 'override'
+  }
+  const legacyItem: ScriptPromptTemplateInfo = {
+    ...getScriptPromptTemplate('marketing'),
+    label: '旧接口标签'
+  }
+
+  const fromApi = resolveScriptTemplateLibrary([apiItem], [legacyItem])
+  const apiMarketing = fromApi.find((tpl) => tpl.id === 'marketing')
+  assert.equal(apiMarketing?.label, '新接口标签')
+  assert.equal(apiMarketing?.source, 'override')
+
+  const fromLegacy = resolveScriptTemplateLibrary([], [legacyItem])
+  assert.equal(fromLegacy.find((tpl) => tpl.id === 'marketing')?.label, '旧接口标签')
+
+  const fromStatic = resolveScriptTemplateLibrary(null, null)
+  assert.equal(fromStatic.length, GITHUB_SCRIPT_TEMPLATES.length)
+  assert.equal(fromStatic.find((tpl) => tpl.id === 'marketing')?.label, getScriptPromptTemplate('marketing').label)
+})
+
+test('#134 templateSourceBadge marks override as 已自定义 and leaves default unmarked', () => {
+  assert.equal(templateSourceBadge('override'), '已自定义')
+  assert.equal(templateSourceBadge('default'), null)
+  assert.equal(templateSourceBadge(undefined), null)
+})
+
+test('#134 applyTemplateItemUpdate replaces the saved item and keeps the selected template', () => {
+  const base = resolveScriptTemplateLibrary(null)
+  const selectedId = base[2].id
+  const saved: ScriptPromptTemplateInfo = {
+    ...getScriptPromptTemplate('marketing'),
+    label: '保存后的营销模板',
+    source: 'override'
+  }
+
+  const next = applyTemplateItemUpdate(base, saved)
+  assert.equal(next.length, base.length)
+  assert.equal(next.find((tpl) => tpl.id === 'marketing')?.label, '保存后的营销模板')
+  assert.equal(next.find((tpl) => tpl.id === 'marketing')?.source, 'override')
+  // 选中项内容与 id 都不因保存其它模板而变。
+  assert.equal(next.find((tpl) => tpl.id === selectedId)?.id, selectedId)
+  assert.equal(
+    next.find((tpl) => tpl.id === selectedId)?.label,
+    base.find((tpl) => tpl.id === selectedId)?.label
+  )
 })

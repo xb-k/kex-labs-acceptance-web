@@ -1183,6 +1183,8 @@ export type ScriptPromptTemplateInfo = {
   recommendedAspect: '16:9' | '9:16' | '1:1' | '4:5'
   supportsNovelSeries?: boolean
   systemDirectives: string
+  /** #134: `GET /api/script-templates` 合并后的来源（default = 内置，override = 本地覆盖）。 */
+  source?: 'default' | 'override'
 }
 
 export type UpstreamGithubSource = {

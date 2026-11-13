@@ -96,11 +96,16 @@ export function mergePlatformProfiles(items: AgentItem[] | undefined | null): Di
   return Array.from(byId.values())
 }
 
+/** #134 `GET /api/script-templates` 的模板项带 source（default/override），与内置模板合并后仍保留。 */
+export type ScriptTemplateWithSource = ScriptPromptTemplate & {
+  source?: ScriptPromptTemplateInfo['source']
+}
+
 export function mergePromptTemplates(
   items: ScriptPromptTemplateInfo[] | undefined | null
-): ScriptPromptTemplate[] {
+): ScriptTemplateWithSource[] {
   if (!items || items.length === 0) return GITHUB_SCRIPT_TEMPLATES
-  const byId = new Map<VideoTemplateId, ScriptPromptTemplate>()
+  const byId = new Map<VideoTemplateId, ScriptTemplateWithSource>()
   for (const fallback of GITHUB_SCRIPT_TEMPLATES) {
     byId.set(fallback.id, fallback)
   }
@@ -114,6 +119,134 @@ export function mergePromptTemplates(
     }
   }
   return Array.from(byId.values())
+}
+
+export type ScriptTemplateEditorPatch = Partial<
+  Pick<
+    ScriptPromptTemplateInfo,
+    | 'label'
+    | 'summary'
+    | 'structureBeats'
+    | 'opticalSpec'
+    | 'systemDirectives'
+    | 'recommendedProfile'
+    | 'recommendedDurationS'
+    | 'recommendedAspect'
+  >
+>
+
+export type ScriptTemplateDraft = {
+  label: string
+  summary: string
+  structureBeats: string
+  opticalSpec: string
+  systemDirectives: string
+  recommendedProfile: ScriptPromptTemplateInfo['recommendedProfile']
+  recommendedDurationS: string
+  recommendedAspect: ScriptAspect
+}
+
+const DRAFT_TEXT_LIMITS = {
+  label: 80,
+  summary: 400,
+  structureBeats: 400,
+  opticalSpec: 400,
+  systemDirectives: 4000
+} as const
+
+/**
+ * #134 模板库以 `GET /api/script-templates` 为准；接口不可用（null/空列表）时
+ * 依次回退到旧 `/api/gemini/script-templates` 数据与随库静态常量，保证 SSR/离线可渲染。
+ */
+export function resolveScriptTemplateLibrary(
+  apiItems: ScriptPromptTemplateInfo[] | undefined | null,
+  legacyItems?: ScriptPromptTemplateInfo[] | null
+): ScriptTemplateWithSource[] {
+  if (apiItems && apiItems.length > 0) return mergePromptTemplates(apiItems)
+  if (legacyItems && legacyItems.length > 0) return mergePromptTemplates(legacyItems)
+  return GITHUB_SCRIPT_TEMPLATES
+}
+
+/** override 项在模板条上标记「已自定义」；default 不占位。 */
+export function templateSourceBadge(source: ScriptPromptTemplateInfo['source']): string | null {
+  return source === 'override' ? '已自定义' : null
+}
+
+/**
+ * #134 保存/恢复后把返回的模板项就地写回列表：选中 id 不变，activeTemplate 自动跟随新内容。
+ * 新增 id（理论上不会）追加到末尾，避免静默丢失。
+ */
+export function applyTemplateItemUpdate(
+  items: ScriptPromptTemplateInfo[] | undefined | null,
+  item: ScriptPromptTemplateInfo
+): ScriptPromptTemplateInfo[] {
+  const base = items ?? []
+  const index = base.findIndex((tpl) => tpl.id === item.id)
+  if (index === -1) return [...base, item]
+  const next = base.slice()
+  next[index] = item
+  return next
+}
+
+export function templateDraftFromTemplate(tpl: {
+  label: string
+  summary: string
+  structureBeats: string
+  opticalSpec: string
+  systemDirectives: string
+  recommendedProfile: ScriptPromptTemplateInfo['recommendedProfile']
+  recommendedDurationS: number
+  recommendedAspect: ScriptPromptTemplateInfo['recommendedAspect']
+}): ScriptTemplateDraft {
+  return {
+    label: tpl.label,
+    summary: tpl.summary,
+    structureBeats: tpl.structureBeats,
+    opticalSpec: tpl.opticalSpec,
+    systemDirectives: tpl.systemDirectives,
+    recommendedProfile: tpl.recommendedProfile,
+    recommendedDurationS: String(tpl.recommendedDurationS),
+    recommendedAspect: tpl.recommendedAspect
+  }
+}
+
+/** 仅提交被改动的字段；与后端 `validateTemplatePatch` 一致（留空/超长在客户端先拦）。 */
+export function diffScriptTemplateDraft(
+  draft: ScriptTemplateDraft,
+  base: ScriptTemplateDraft
+): ScriptTemplateEditorPatch {
+  const patch: ScriptTemplateEditorPatch = {}
+  const label = draft.label.trim()
+  const summary = draft.summary.trim()
+  const structureBeats = draft.structureBeats.trim()
+  const opticalSpec = draft.opticalSpec.trim()
+  const systemDirectives = draft.systemDirectives.trim()
+  if (label !== base.label.trim()) patch.label = label
+  if (summary !== base.summary.trim()) patch.summary = summary
+  if (structureBeats !== base.structureBeats.trim()) patch.structureBeats = structureBeats
+  if (opticalSpec !== base.opticalSpec.trim()) patch.opticalSpec = opticalSpec
+  if (systemDirectives !== base.systemDirectives.trim()) patch.systemDirectives = systemDirectives
+  if (draft.recommendedProfile !== base.recommendedProfile) {
+    patch.recommendedProfile = draft.recommendedProfile
+  }
+  const duration = Number(draft.recommendedDurationS)
+  if (Number.isFinite(duration) && duration !== Number(base.recommendedDurationS)) {
+    patch.recommendedDurationS = duration as ScriptPromptTemplateInfo['recommendedDurationS']
+  }
+  if (draft.recommendedAspect !== base.recommendedAspect) {
+    patch.recommendedAspect = draft.recommendedAspect
+  }
+  return patch
+}
+
+/** 返回首条校验错误，null 表示可提交。 */
+export function validateScriptTemplateDraft(draft: ScriptTemplateDraft): string | null {
+  for (const field of Object.keys(DRAFT_TEXT_LIMITS) as Array<keyof typeof DRAFT_TEXT_LIMITS>) {
+    const value = draft[field].trim()
+    if (!value) return `${field} 不能为空`
+    if (value.length > DRAFT_TEXT_LIMITS[field]) return `${field} 超过 ${DRAFT_TEXT_LIMITS[field]} 字上限`
+  }
+  return null
 }
 
 export const STORY_ERA_OPTIONS = [

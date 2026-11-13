@@ -344,7 +344,7 @@ export function setManualVerify(
 
 /** 写 JSON；错误消息优先取后端的 `{ error }`，并保留状态码与原始 body 供调用方细分。 */
 async function requestJson<T>(
-  method: 'POST' | 'PATCH' | 'DELETE',
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   url: string,
   body?: unknown,
   signal?: AbortSignal
@@ -379,6 +379,11 @@ async function requestJson<T>(
 /** POST JSON；错误消息优先取后端的 `{ error }`，并保留状态码供调用方区分 401/403。 */
 export function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   return requestJson<T>('POST', url, body, signal)
+}
+
+/** PUT JSON；错误处理与 postJson 一致（#134 模板覆盖保存）。 */
+export function putJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  return requestJson<T>('PUT', url, body, signal)
 }
 
 /** PATCH JSON；错误处理与 postJson 一致（#87 Brief 润色结果保存）。 */

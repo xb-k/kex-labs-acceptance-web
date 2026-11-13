@@ -17,18 +17,21 @@ import { ASPECTS } from '../studio-ui'
 import { Copy, Download, ExternalLink, Refresh, Search, Shield, Sliders, Sparkles } from '../icons'
 import { IssueMarkdown } from '../IssueMarkdown'
 import { AsyncStatusLine } from '../ui'
+import { ScriptTemplateEditorDrawer } from './ScriptTemplateEditorDrawer'
 import {
+  applyTemplateItemUpdate,
   buildExportMarkdown,
   buildExportPlainText,
   CANONICAL_DURATION_OPTIONS,
   mergePlatformProfiles,
-  mergePromptTemplates,
   resolveHistoricalGroundingActive,
+  resolveScriptTemplateLibrary,
   sanitizeExportFilename,
   scheduleWaitLabel,
   SCRIPT_PRESETS,
   STORY_ERA_OPTIONS,
   SYNC_INTERVAL_OPTIONS,
+  templateSourceBadge,
   toBriefPolishedFromGenerated,
   type ScriptAspect
 } from './script-editor-utils'
@@ -40,6 +43,13 @@ type TemplatesResponse = {
   total: number
   categories?: string[]
   sync?: TemplateSyncState
+}
+
+/** #134 新契约：`{ items, total, warnings }`，items 带 source（default/override）。 */
+type ScriptTemplateLibraryResponse = {
+  items: ScriptPromptTemplateInfo[]
+  total?: number
+  warnings?: string[]
 }
 
 type SyncTemplatesResponse = {
@@ -85,21 +95,30 @@ export function ScriptEditorPanel({
   onNotify?: (message: string) => void
 }) {
   const profilesRes = useJson<AgentsResponse>('/api/agents?type=profile')
-  const templatesRes = useJson<TemplatesResponse>('/api/gemini/script-templates')
+  // #134 模板库以 `/api/script-templates` 为准；旧接口仍挂载，仅用于 Gitea 同步状态与失败回退。
+  const templateLibraryRes = useJson<ScriptTemplateLibraryResponse>('/api/script-templates')
+  const legacyTemplatesRes = useJson<TemplatesResponse>('/api/gemini/script-templates')
 
   const [remoteTemplatesOverride, setRemoteTemplatesOverride] = useState<ScriptPromptTemplateInfo[] | null>(null)
+  /** 抽屉保存/恢复返回的最新单项；先即时回写列表，再静默刷新新接口。 */
+  const [savedTemplateItem, setSavedTemplateItem] = useState<ScriptPromptTemplateInfo | null>(null)
   const [syncOverride, setSyncOverride] = useState<TemplateSyncState | null>(null)
+  const [editingTemplate, setEditingTemplate] = useState(false)
 
   const directorProfiles = useMemo(
     () => mergePlatformProfiles(profilesRes.data?.items),
     [profilesRes.data?.items]
   )
+  const libraryItems = useMemo(() => {
+    const base = remoteTemplatesOverride ?? templateLibraryRes.data?.items
+    return savedTemplateItem ? applyTemplateItemUpdate(base, savedTemplateItem) : base
+  }, [remoteTemplatesOverride, templateLibraryRes.data?.items, savedTemplateItem])
   const promptTemplates = useMemo(
-    () => mergePromptTemplates(remoteTemplatesOverride ?? templatesRes.data?.items),
-    [remoteTemplatesOverride, templatesRes.data?.items]
+    () => resolveScriptTemplateLibrary(libraryItems, legacyTemplatesRes.data?.items),
+    [libraryItems, legacyTemplatesRes.data?.items]
   )
 
-  const syncState = syncOverride ?? templatesRes.data?.sync ?? null
+  const syncState = syncOverride ?? legacyTemplatesRes.data?.sync ?? null
   const [syncingSource, setSyncingSource] = useState<'gitea' | 'github' | null>(null)
   const [updatingSchedule, setUpdatingSchedule] = useState(false)
 
@@ -442,7 +461,9 @@ export function ScriptEditorPanel({
       })
       setSyncOverride(res.sync)
       setRemoteTemplatesOverride(res.items)
-      templatesRes.refresh()
+      setSavedTemplateItem(null)
+      legacyTemplatesRes.refresh()
+      templateLibraryRes.refresh()
       onNotify?.(res.sync.lastResultMessage)
 
       if (isGitea && generated && prompt.trim() && !generating) {
@@ -484,6 +505,12 @@ export function ScriptEditorPanel({
       setUpdatingSchedule(false)
       setScheduleStartedAt(null)
     }
+  }
+
+  /** #134 抽屉保存/恢复成功：即时回写该项并静默刷新列表；selectedTemplateId 不动，选中保持。 */
+  const handleTemplateSaved = (item: ScriptPromptTemplateInfo) => {
+    setSavedTemplateItem(item)
+    templateLibraryRes.refresh()
   }
 
   const handleSelectVideoTemplate = (tpl: ScriptPromptTemplateInfo) => {
@@ -765,10 +792,31 @@ export function ScriptEditorPanel({
                   >
                     <span>{tpl.category}</span>
                     <span className="num text-[10.5px] opacity-75">{tpl.recommendedDurationS}s</span>
+                    {templateSourceBadge(tpl.source) && (
+                      <span
+                        data-testid={`script-template-override-tab-${tpl.id}`}
+                        title="该模板已保存本地覆盖"
+                        className="rounded-full bg-[#FFF4E5] px-1 py-px text-[9.5px] font-medium text-[#8A4B00]"
+                      >
+                        {templateSourceBadge(tpl.source)}
+                      </span>
+                    )}
                   </button>
                 )
               })}
             </div>
+
+            <button
+              type="button"
+              onClick={() => setEditingTemplate(true)}
+              disabled={generating}
+              data-testid="script-template-edit-btn"
+              title="编辑当前导演模板，保存为本地覆盖（PUT /api/script-templates/:id）"
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[9px] border border-black/[0.1] bg-white px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-[#FAFAFB] disabled:cursor-not-allowed disabled:opacity-60 whitespace-nowrap"
+            >
+              <Sliders className="h-3.5 w-3.5" />
+              编辑模板
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 text-[11.5px]">
@@ -796,11 +844,21 @@ export function ScriptEditorPanel({
             <span className="font-medium text-apple-text">{activeTemplate.label}：</span>
             {activeTemplate.summary} · {activeTemplate.structureBeats}
           </p>
-          {isDirectivesCustomized && (
-            <span className="shrink-0 font-mono text-[10.5px] font-medium text-[#9A5B00]">
-              已微调导演指令
-            </span>
-          )}
+          <div className="flex shrink-0 flex-wrap items-baseline gap-2">
+            {activeTemplate.source === 'override' && (
+              <span
+                data-testid="script-template-override-badge"
+                className="rounded-full bg-[#FFF4E5] px-1.5 py-px text-[10.5px] font-medium text-[#8A4B00]"
+              >
+                已自定义 · 本地覆盖
+              </span>
+            )}
+            {isDirectivesCustomized && (
+              <span className="font-mono text-[10.5px] font-medium text-[#9A5B00]">
+                已微调导演指令
+              </span>
+            )}
+          </div>
         </div>
 
         {templateFeedback && (
@@ -1055,6 +1113,15 @@ export function ScriptEditorPanel({
           </div>
         )}
       </div>
+
+      {editingTemplate && (
+        <ScriptTemplateEditorDrawer
+          template={activeTemplate}
+          onClose={() => setEditingTemplate(false)}
+          onSaved={handleTemplateSaved}
+          onNotify={onNotify}
+        />
+      )}
 
       {/* Main Two-Column Workspace (Hairline Divided, Zero Nested Cards) */}
       <div className="grid divide-y divide-black/[0.06] lg:grid-cols-12 lg:divide-x lg:divide-y-0">
