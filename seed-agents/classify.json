@@ -1,0 +1,95 @@
+{
+  "agents": {
+    "seed-acceptance-tester": {
+      "host": "macbook",
+      "project": "kex-labs-video",
+      "skills": ["seed-web-tester", "seed-convergence-orchestration"]
+    },
+    "seed-dev": {
+      "host": "macbook",
+      "project": "通用",
+      "skills": ["seed-dev-cookbook", "seed-codebase-map", "seed-receiving-code-review"]
+    },
+    "seed-lofa-dev": {
+      "host": "macbook",
+      "project": "lofa",
+      "skills": ["seed-rpa-flow-fix"]
+    },
+    "seed-memory-architect": {
+      "host": "studio",
+      "project": "agent-memory",
+      "skills": []
+    },
+    "seed-memory-dev": {
+      "host": "studio",
+      "project": "agent-memory",
+      "skills": []
+    },
+    "seed-plan-dev": {
+      "host": "macbook",
+      "project": "通用",
+      "skills": ["seed-dev-cookbook", "seed-codebase-map"]
+    },
+    "seed-reviewer": {
+      "host": "macbook",
+      "project": "通用",
+      "skills": ["seed-receiving-code-review", "seed-repo-audit"]
+    },
+    "seed-solution-architect": {
+      "host": "macbook",
+      "project": "通用",
+      "skills": []
+    },
+    "seed-task-runner": {
+      "host": "macbook",
+      "project": "通用",
+      "skills": ["seed-show-tasks"]
+    },
+    "seed-ui-dev": {
+      "host": "macbook",
+      "project": "通用",
+      "skills": [
+        "seed-impeccable",
+        "seed-design-taste-frontend",
+        "seed-gsap-core",
+        "seed-gsap-react",
+        "seed-gsap-timeline",
+        "seed-gsap-scrolltrigger",
+        "seed-gsap-plugins",
+        "seed-gsap-performance"
+      ]
+    },
+    "seed-video-dev": {
+      "host": "studio",
+      "project": "kex-labs-video",
+      "skills": ["seed-kex-video-pipeline"]
+    },
+    "seed-mastermind-plan": {
+      "host": "studio",
+      "project": "通用",
+      "skills": []
+    }
+  },
+  "skills": {
+    "seed-codebase-map": { "project": "通用" },
+    "seed-convergence-orchestration": { "project": "kex-labs-video" },
+    "seed-design-taste-frontend": { "project": "通用" },
+    "seed-dev-cookbook": { "project": "通用" },
+    "seed-gsap-core": { "project": "通用" },
+    "seed-gsap-frameworks": { "project": "通用" },
+    "seed-gsap-performance": { "project": "通用" },
+    "seed-gsap-plugins": { "project": "通用" },
+    "seed-gsap-react": { "project": "通用" },
+    "seed-gsap-scrolltrigger": { "project": "通用" },
+    "seed-gsap-timeline": { "project": "通用" },
+    "seed-gsap-utils": { "project": "通用" },
+    "seed-impeccable": { "project": "通用" },
+    "seed-kex-video-pipeline": { "project": "kex-labs-video" },
+    "seed-receiving-code-review": { "project": "通用" },
+    "seed-repo-audit": { "project": "通用" },
+    "seed-rpa-flow-fix": { "project": "lofa" },
+    "seed-show-tasks": { "project": "通用" },
+    "seed-web-tester": { "project": "kex-labs-video" },
+    "seed-website-security-assessment": { "project": "通用" }
+  }
+}

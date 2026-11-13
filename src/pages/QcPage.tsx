@@ -1,0 +1,481 @@
+import { useMemo } from 'react'
+import type { ReactNode } from 'react'
+import type { QcResponse, QcRow } from '../types'
+import { useJson } from '../api'
+import { Link } from '../router'
+import { ArrowLeft } from '../components/icons'
+import { LapvarChart } from '../components/LapvarChart'
+import { QcRuleList } from '../components/QcRuleList'
+import { overallVerdict } from '../qc-explain'
+import type { VerdictKind } from '../qc-explain'
+
+const num = (v: string | number | undefined): number | null => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+export function QcPage({ id }: { id: string }) {
+  const { status, data, error, retry } = useJson<QcResponse>(`/api/qc/${encodeURIComponent(id)}`)
+
+  if (status === 'loading') {
+    return (
+      <div aria-busy="true" aria-label="正在加载 QC 数据">
+        <TopLink id={id} />
+        <div className="card mt-4 h-[460px] animate-pulse" />
+      </div>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <div>
+        <TopLink id={id} />
+        <div className="card mt-4 p-6" role="alert">
+          <h1 className="text-base font-semibold">QC 数据读取失败</h1>
+          <p className="mt-2 text-sm text-apple-subtext">{error}</p>
+          <button
+            type="button"
+            onClick={retry}
+            className="mt-4 rounded-lg bg-apple-text px-3 py-1.5 text-xs font-medium text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+          >
+            重试
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return <QcContent data={data} />
+}
+
+function QcContent({ data }: { data: QcResponse }) {
+  const stats = useMemo(() => {
+    const orig = data.rows.map((r) => num(r.lapvar_orig)).filter((n): n is number => n != null)
+    const out = data.rows.map((r) => num(r.lapvar_out)).filter((n): n is number => n != null)
+    const ratio = data.rows.map((r) => num(r.lap_ratio)).filter((n): n is number => n != null)
+    const time = data.rows.map((r) => num(r.t_src)).filter((n): n is number => n != null)
+    const summarize = (arr: number[]) =>
+      arr.length
+        ? {
+            mean: arr.reduce((a, b) => a + b, 0) / arr.length,
+            min: Math.min(...arr),
+            max: Math.max(...arr)
+          }
+        : null
+    return {
+      orig: summarize(orig),
+      out: summarize(out),
+      ratio: summarize(ratio),
+      tMin: time.length ? Math.min(...time) : null,
+      tMax: time.length ? Math.max(...time) : null
+    }
+  }, [data.rows])
+
+  const sampled = useMemo(() => {
+    const rows = data.rows
+    if (rows.length === 0) return []
+    const step = Math.max(1, Math.ceil(rows.length / 20))
+    return rows.filter((_, i) => i % step === 0)
+  }, [data.rows])
+
+  const lowRatio = useMemo(() => {
+    return data.rows
+      .map((r) => ({ row: r, ratio: num(r.lap_ratio) }))
+      .filter((x): x is { row: QcRow; ratio: number } => x.ratio != null)
+      .sort((a, b) => a.ratio - b.ratio)
+      .slice(0, 10)
+  }, [data.rows])
+
+  return (
+    <div>
+      <TopLink id={data.jobId} />
+
+      <header className="mt-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-md bg-[#F0F6FF] px-1.5 py-0.5 text-xs font-medium text-apple-blueInk">
+            {data.jobId.toUpperCase()} · QC
+          </span>
+          <span className="num text-xs text-apple-subtext">{data.taskId}</span>
+        </div>
+        <h1 className="mt-2 text-[26px] font-semibold leading-tight tracking-[-0.02em] sm:text-[32px]">清晰度 QC 曲线</h1>
+        <p className="mt-2 max-w-[78ch] text-sm leading-relaxed text-apple-subtext">
+          这一页回答三件事：画面够不够清晰、哪些帧可能偏软、下一步该怎么处理。专业指标与原始数值全部保留在下方。
+        </p>
+        <p className="num mt-1 max-w-[78ch] break-all text-[11px] leading-5 text-apple-subtext">
+          数据源 {data.source} · 共 {data.rows.length} 行采样 · lapvar 即拉普拉斯方差，数值越高通常越清晰
+        </p>
+      </header>
+
+      <VerdictBanner rules={data.rules} />
+
+      <HowToCard id={data.jobId} />
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
+        <section className="card p-4 sm:p-5">
+          <LapvarChart rows={data.rows} thresholds={data.thresholds} />
+        </section>
+        <AuditCard rows={data.rows} />
+      </div>
+
+      <section className="card mt-4 p-4 sm:p-5">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-base font-semibold tracking-tight">阈值说明</h2>
+          <p className="num text-xs text-apple-subtext">
+            {stats.tMin != null && stats.tMax != null ? `${stats.tMin.toFixed(3)}s – ${stats.tMax.toFixed(3)}s` : '时间范围无数据'}
+          </p>
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-[#4A4A4F]">{data.unitNote}</p>
+        <ul className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-apple-subtext">
+          {data.thresholds.map((t) => (
+            <li key={t.label}>
+              <span className="text-apple-text">{t.label}</span>：<span className="num">{t.value}</span>
+              <span className="ml-1">（{t.note}）</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="card mt-4 p-4 sm:p-5" aria-labelledby="qc-detail-rules-title">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 id="qc-detail-rules-title" className="text-base font-semibold tracking-tight">
+            门禁规则清单
+          </h2>
+          <p className="num text-xs text-apple-subtext" data-testid="qc-rules-count">
+            {data.rules.length} 条
+          </p>
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-[#4A4A4F]">
+          每条规则先给判定，再给白话解释和建议动作；阈值 / 实际值 / 判定原样保留，页面不重算。
+        </p>
+        <QcRuleList rules={data.rules} source={data.rulesSource} explain />
+      </section>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <StatsCard title="lapvar_orig（原片）" stats={stats.orig} />
+        <StatsCard title="lapvar_out（输出）" stats={stats.out} />
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <TableCard
+          title="抽样数据"
+          note="按行等距抽样，仅用于快速核对；完整 297 行见 metrics.csv。"
+          rows={sampled}
+        />
+        <TableCard
+          title="比值最低的 10 帧"
+          note="lap_ratio = lapvar_out / lapvar_orig；按真实比值升序。t_src 是时间点（秒），可回 job 详情播放器定位。"
+          rows={lowRatio.map((x) => x.row)}
+        />
+      </div>
+
+      <p className="mt-4 text-xs leading-relaxed text-apple-subtext">
+        比值与曲线均为 CSV 原始值；本页不做平滑、不插值、不补缺失帧。
+      </p>
+
+      <GlossaryCard />
+    </div>
+  )
+}
+
+const VERDICT_STYLE: Record<VerdictKind, { wrap: string; title: string; dot: string }> = {
+  pass: { wrap: 'border-[#CDEED6] bg-[#F2F9F4]', title: 'text-[#1E7A3C]', dot: 'bg-[#30A14E]' },
+  attention: { wrap: 'border-[#F3DEBE] bg-[#FFF8EC]', title: 'text-[#8A4B00]', dot: 'bg-[#C77700]' },
+  fail: { wrap: 'border-[#F3D3CF] bg-[#FDF2F1]', title: 'text-[#B3261E]', dot: 'bg-[#FF3B30]' },
+  insufficient: { wrap: 'border-[#E5E5EA] bg-[#F7F7F8]', title: 'text-[#4A4A4F]', dot: 'bg-[#8E8E93]' }
+}
+
+/** 首屏结论（AC1）：只读 rules，计数与逐行判定同源。 */
+function VerdictBanner({ rules }: { rules: QcResponse['rules'] }) {
+  const verdict = overallVerdict(rules)
+  const tone = VERDICT_STYLE[verdict.kind]
+  const counts = [
+    ['通过', verdict.counts.pass, 'pass'],
+    ['未通过', verdict.counts.fail, 'fail'],
+    ['无数据', verdict.counts.unavailable, 'unavailable']
+  ] as const
+
+  return (
+    <section
+      className={`mt-4 rounded-card border p-4 sm:p-5 ${tone.wrap}`}
+      aria-labelledby="qc-verdict-title"
+      data-testid="qc-verdict"
+      data-verdict-kind={verdict.kind}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-[11px] font-medium tracking-[0.08em] text-apple-subtext">结论</p>
+          <h2 id="qc-verdict-title" className={`mt-1 flex items-center gap-2 text-[20px] font-semibold leading-tight tracking-tight ${tone.title}`}>
+            <span aria-hidden="true" className={`h-2 w-2 rounded-full ${tone.dot}`} />
+            {verdict.label}
+          </h2>
+          <p className="mt-1.5 max-w-[72ch] text-[13px] leading-6 text-[#3A3A3F]">{verdict.plain}</p>
+        </div>
+        <dl className="flex flex-wrap gap-2" data-testid="qc-verdict-counts">
+          {counts.map(([label, value, key]) => (
+            <div
+              key={key}
+              data-count={key}
+              className="flex min-w-[74px] flex-col rounded-xl border border-black/[0.06] bg-white/80 px-3 py-2"
+            >
+              <dt className="text-[10px] text-apple-subtext">{label}</dt>
+              <dd className="num mt-0.5 text-lg font-semibold leading-none">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+      <p className="mt-3 text-[11px] leading-4 text-apple-subtext">
+        结论与计数只来自后端返回的 {verdict.counts.total} 条门禁规则；本页不重算阈值，也不自行改判定。
+      </p>
+    </section>
+  )
+}
+
+/** 3 步指引（AC4）：只链真实路由，不编造按钮。 */
+function HowToCard({ id }: { id: string }) {
+  const linkClass =
+    'rounded font-medium text-apple-blueInk underline decoration-apple-blueInk/30 underline-offset-2 transition-colors hover:text-apple-blue focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/40'
+  return (
+    <section className="card mt-4 p-4 sm:p-5" aria-labelledby="qc-howto-title">
+      <h2 id="qc-howto-title" className="text-base font-semibold tracking-tight">
+        3 步看懂这一页
+      </h2>
+      <ol className="mt-3 grid gap-3 sm:grid-cols-3 sm:gap-5">
+        <li className="flex gap-2.5">
+          <span className="num mt-px text-[11px] font-semibold text-apple-subtext">01</span>
+          <div>
+            <p className="text-xs font-semibold text-apple-text">先看结论</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-apple-subtext">
+              通过 / 需要注意 / 未通过 / 数据不足，后面一句话说明原因；计数和下方规则表逐条对应。
+            </p>
+          </div>
+        </li>
+        <li className="flex gap-2.5">
+          <span className="num mt-px text-[11px] font-semibold text-apple-subtext">02</span>
+          <div>
+            <p className="text-xs font-semibold text-apple-text">再读曲线</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-apple-subtext">
+              绿线是输出片清晰度，越高越清晰；跌到橙色警戒线以下的帧，会出现在「比值最低的 10 帧」里。
+            </p>
+          </div>
+        </li>
+        <li className="flex gap-2.5">
+          <span className="num mt-px text-[11px] font-semibold text-apple-subtext">03</span>
+          <div>
+            <p className="text-xs font-semibold text-apple-text">需要处理时</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-apple-subtext">
+              去 <Link to="/jobs" className={linkClass}>任务中心</Link> 重跑 B 轨，或回{' '}
+              <Link to={`/job/${id}`} className={linkClass}>本 job 详情</Link> 看片复核；调降噪 / 调色 / 分镜，或换素材。拿不准就联系项目维护者。
+            </p>
+          </div>
+        </li>
+      </ol>
+    </section>
+  )
+}
+
+const GLOSSARY: { term: string; alias?: string; plain: string }[] = [
+  { term: 'lapvar', alias: '拉普拉斯方差', plain: '逐帧统计画面边缘细节的数值；越高通常越清晰，越低越软。' },
+  { term: 'SSIM', alias: '结构相似度', plain: '0–1 之间，越接近 1 表示输出片与原片结构越一致。' },
+  { term: 'lap_ratio', alias: '清晰度比值', plain: '输出清晰度 ÷ 原片清晰度；小于 1 表示输出比原片更软。' },
+  { term: 't_src', alias: '原片时间点', plain: '单位是秒，用来在播放器里定位某一帧。' },
+  { term: 'frame', alias: '帧序号', plain: '60fps 下 1 秒约 60 帧；用于和逐帧数据对照。' },
+  { term: 'ΔE2000', alias: '色彩偏差', plain: '数值越小越接近目标颜色，越大说明偏色越明显。' },
+  { term: 'LU', alias: '响度单位', plain: 'Loudness Unit，用来衡量声音的动态范围。' },
+  { term: 'BGM', alias: '背景音乐', plain: '成片里铺在画面下方的音乐。' },
+  { term: '自相关峰', alias: '循环相似度', plain: '把音频和自己错开一段时间比较；峰值越高，越像在重复同一段。' },
+  { term: 'op / unit', alias: '比较符 / 单位', plain: '阈值怎么写（>、<= 等）和用什么单位，只按后端返回值展示。' },
+  { term: '门禁规则', alias: '通过条件', plain: '后端 policy 给出的交付条件；本页只展示判定，不改阈值。' }
+]
+
+/** 术语表（AC5）：只覆盖本页实际出现的词。 */
+function GlossaryCard() {
+  return (
+    <details className="card mt-4 p-4 sm:p-5" data-testid="qc-glossary">
+      <summary className="cursor-pointer select-none rounded text-[15px] font-semibold tracking-tight focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/40">
+        术语表：这一页出现的词
+        <span className="ml-2 text-[11px] font-normal text-apple-subtext">中文优先，英文作副标 · 点开查看</span>
+      </summary>
+      <dl className="mt-4 grid gap-x-8 gap-y-3 sm:grid-cols-2">
+        {GLOSSARY.map((item) => (
+          <div key={item.term}>
+            <dt className="text-xs font-semibold text-apple-text">
+              {item.term}
+              {item.alias && <span className="ml-1.5 font-normal text-apple-subtext">{item.alias}</span>}
+            </dt>
+            <dd className="mt-0.5 text-[11px] leading-5 text-apple-subtext">{item.plain}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  )
+}
+
+function SubtleBadge({ tone, children }: { tone: 'green' | 'orange' | 'red'; children: ReactNode }) {
+  const styles = {
+    green: 'bg-[#EAF8EE] text-[#1E7A3C] ring-[#CDEED6]',
+    orange: 'bg-[#FFF3E4] text-[#B25E00] ring-[#F8E2C8]',
+    red: 'bg-[#FCEDEB] text-[#B3261E] ring-[#F3D3CF]'
+  } as const
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ring-inset ${styles[tone]}`}>
+      {children}
+    </span>
+  )
+}
+
+function AuditRow({
+  label,
+  value,
+  tone,
+  badge,
+  note
+}: {
+  label: string
+  value: string
+  tone: 'green' | 'orange' | 'red'
+  badge: string
+  note: string
+}) {
+  return (
+    <li className="flex items-start justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
+      <div className="min-w-0">
+        <p className="text-[12px] font-medium leading-5">{label}</p>
+        <p className="mt-0.5 text-[10px] leading-4 text-apple-subtext">{note}</p>
+      </div>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <span className="num text-[13px] font-semibold leading-5">{value}</span>
+        <SubtleBadge tone={tone}>{badge}</SubtleBadge>
+      </div>
+    </li>
+  )
+}
+
+function AuditCard({ rows }: { rows: QcRow[] }) {
+  const ssimValues = rows.map((row) => num(row.ssim)).filter((value): value is number => value != null)
+  const ssimMean = ssimValues.length ? ssimValues.reduce((sum, value) => sum + value, 0) / ssimValues.length : null
+
+  return (
+    <section className="card p-4 sm:p-5" aria-labelledby="qc-audit-title">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 id="qc-audit-title" className="text-base font-semibold tracking-tight">
+          审计结果
+        </h2>
+        <span className="text-[10px] text-apple-subtext">metrics.csv 实测</span>
+      </div>
+      <ul className="mt-3 divide-y divide-apple-line">
+        <AuditRow
+          label="SSIM 关键帧相似度"
+          value={ssimMean == null ? '—' : ssimMean.toFixed(4)}
+          tone={ssimMean == null ? 'orange' : 'green'}
+          badge={ssimMean == null ? '无数据' : '实测均值'}
+          note={`按行实测 · n=${ssimValues.length}`}
+        />
+        <AuditRow
+          label="亮度帧间跳变率"
+          value="—"
+          tone="orange"
+          badge="接口无字段"
+          note="/api/qc 未返回亮度跳变指标"
+        />
+        <AuditRow
+          label="坏帧检测"
+          value="—"
+          tone="orange"
+          badge="接口无字段"
+          note="/api/qc 未返回坏帧统计"
+        />
+      </ul>
+      <p className="mt-3 text-[10px] leading-4 text-apple-subtext">只显示接口真实值；缺字段以 — 表示，不填 0。</p>
+    </section>
+  )
+}
+
+function StatsCard({
+  title,
+  stats
+}: {
+  title: string
+  stats: { mean: number; min: number; max: number } | null
+}) {
+  return (
+    <section className="card p-4 sm:p-5">
+      <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
+      {stats ? (
+        <dl className="mt-3 grid grid-cols-3 gap-3 text-center">
+          {[
+            ['均值', stats.mean],
+            ['最小', stats.min],
+            ['最大', stats.max]
+          ].map(([label, value]) => (
+            <div key={label as string} className="rounded-xl bg-[#FAFAFC] px-2 py-3">
+              <dt className="text-xs text-apple-subtext">{label}</dt>
+              <dd className="num mt-1 text-lg font-semibold tracking-tight">{(value as number).toFixed(1)}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="mt-3 text-sm text-apple-subtext">无数据</p>
+      )}
+    </section>
+  )
+}
+
+function TableCard({ title, note, rows }: { title: string; note: string; rows: QcRow[] }) {
+  return (
+    <section className="card overflow-hidden">
+      <div className="p-4 pb-3 sm:px-5">
+        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
+        <p className="mt-0.5 text-xs leading-relaxed text-apple-subtext">{note}</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] text-left text-xs">
+          <thead>
+            <tr className="border-y border-apple-line bg-[#FAFAFC] text-xs text-apple-subtext">
+              <th scope="col" className="px-4 py-2 font-medium sm:px-5">t_src</th>
+              <th scope="col" className="px-2 py-2 font-medium">frame</th>
+              <th scope="col" className="px-2 py-2 text-right font-medium">orig</th>
+              <th scope="col" className="px-2 py-2 text-right font-medium">out</th>
+              <th scope="col" className="px-2 py-2 text-right font-medium">ratio</th>
+              <th scope="col" className="px-4 py-2 text-right font-medium sm:px-5">ssim</th>
+            </tr>
+          </thead>
+          <tbody className="num tabular-nums divide-y divide-apple-line">
+            {rows.map((r, i) => (
+              <tr key={`${r.frame}-${i}`} className="h-[54px] align-middle hover:bg-[#FAFAFC]">
+                <td className="px-4 py-2 sm:px-5">{num(r.t_src)?.toFixed(3) ?? '—'}</td>
+                <td className="px-2 py-2">{num(r.frame) ?? '—'}</td>
+                <td className="px-2 py-2 text-right">{num(r.lapvar_orig)?.toFixed(1) ?? '—'}</td>
+                <td className="px-2 py-2 text-right">{num(r.lapvar_out)?.toFixed(1) ?? '—'}</td>
+                <td className="px-2 py-2 text-right">{num(r.lap_ratio)?.toFixed(3) ?? '—'}</td>
+                <td className="px-4 py-2 text-right sm:px-5">{num(r.ssim)?.toFixed(4) ?? '—'}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-5 py-6 text-center text-apple-subtext">
+                  无数据
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
+function TopLink({ id }: { id: string }) {
+  return (
+    <Link
+      to={`/job/${id}`}
+      className="inline-flex items-center gap-1.5 rounded-lg py-1 text-xs font-medium text-apple-subtext transition-colors hover:text-apple-text focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+    >
+      <ArrowLeft className="h-3.5 w-3.5" />
+      返回 {id.toUpperCase()} 详情
+    </Link>
+  )
+}

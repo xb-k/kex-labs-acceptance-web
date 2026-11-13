@@ -1,0 +1,1 @@
+{"human": {"grain": 0.18, "handheld": true, "jitter_px": 2, "pacing_bias": 0.05, "vignette": 0.12}, "label": "人物 Vlog", "lut": "looks/vlog_warm_film.cube", "prompt": "prompts/vlog_warm_film.v1.txt", "prompt_version": "v1"}

@@ -1,0 +1,48 @@
+services:
+  web:
+    build: .
+    image: kexlabs-acceptance-web:latest
+    container_name: kexlabs-acceptance-web
+    ports:
+      - "8088:8088"
+    # Gitea credentials + GITEA_WEB_URL live outside the repo (600); the NAS
+    # .env points GITEA_ENV_FILE at $BASE/secrets/gitea.env.
+    env_file:
+      - ${GITEA_ENV_FILE:-./secrets/gitea.env}
+    environment:
+      # Studio ComfyUI (comfy-persist): NAS has no local ComfyUI, so the URL
+      # comes from .env; default keeps the old localhost behaviour.
+      COMFYUI_URL: ${COMFYUI_URL:-http://127.0.0.1:8188}
+      # Studio ollama (#87): NAS has no GPU; the URL points at the studio
+      # tailnet relay (100.92.106.101:11437) and comes from .env.
+      OLLAMA_URL: ${OLLAMA_URL:-http://127.0.0.1:11434}
+      # Studio intake bridge (Gitea #84): server-side proxy writes jobs/inbox on
+      # the studio host. The token is the studio's WEB_WRITE_TOKEN; compose
+      # fails closed if it is missing rather than starting a write-open web.
+      STUDIO_INTAKE_URL: ${STUDIO_INTAKE_URL:-http://100.92.106.101:8090}
+      WEB_WRITE_TOKEN: ${WEB_WRITE_TOKEN:?set WEB_WRITE_TOKEN}
+      WEB_DATA_ROOT: /data
+      PORT: "8088"
+      # kex-labs-video repo (state/workflows/docs/policy/reports) and its logs,
+      # both read-only mounts; files mode only, no Postgres/network here.
+      KEX_REPO_ROOT: /kex-repo
+      KEX_LOG_DIR: /logs
+    volumes:
+      # Data dir layout: IMG_3189.MOV, issue-19/b-track-s{0,1}/,
+      # .opencode/state/project-status.json (see README「部署」).
+      # rw on purpose: POST /api/issues creates issue-N/ under WEB_ISSUE_ROOT
+      # (defaults to the data root); the other mounts stay read-only.
+      - "${WEB_DATA_DIR:-./data}:/data"
+      - "${KEX_REPO_DIR:?set KEX_REPO_DIR}:/kex-repo:ro"
+      - "${WEB_LOG_DIR:-./logs}:/logs:ro"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('node:http').get('http://127.0.0.1:8088/api/jobs',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

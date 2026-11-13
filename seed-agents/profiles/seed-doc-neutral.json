@@ -1,0 +1,1 @@
+{"human": {"grain": 0.06, "handheld": false, "jitter_px": 1, "pacing_bias": -0.1, "vignette": 0.06}, "label": "宣传纪实", "lut": "looks/doc_neutral.cube", "prompt": "prompts/doc_neutral.v1.txt", "prompt_version": "v1"}

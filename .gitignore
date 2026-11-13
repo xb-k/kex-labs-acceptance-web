@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+server/serve.mjs
+server/sync.mjs
+
+# evidence / artifacts
+screenshots/
+
+# logs
+*.log
+
+# local state
+.opencode/state/
+
+# OS
+.DS_Store

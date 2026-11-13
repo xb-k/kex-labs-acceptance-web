@@ -1,0 +1,525 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    @apply bg-apple-bg text-apple-text antialiased;
+    font-feature-settings: 'tnum' 0;
+    background: #f5f5f7;
+  }
+
+  ::selection {
+    background: rgba(0, 113, 227, 0.18);
+  }
+
+  :focus-visible {
+    outline: 2px solid rgba(0, 113, 227, 0.55);
+    outline-offset: 2px;
+  }
+
+  video {
+    background: #000;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(17, 24, 39, 0.18) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(17, 24, 39, 0.16);
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-card bg-white;
+    border: 1px solid rgba(0, 0, 0, 0.04);
+    /* T-WEB-078a：阴影从 0.04 收细到 0.03（#78 全局卡片层级），边框/圆角不变。 */
+    box-shadow:
+      0 4px 24px -4px rgba(0, 0, 0, 0.03),
+      0 1px 2px 0 rgba(0, 0, 0, 0.02);
+  }
+
+  .card-interactive {
+    @apply transition-[transform,box-shadow,border-color] duration-200 ease-apple will-change-transform;
+  }
+
+  .card-interactive:hover {
+    @apply border-black/[0.09] shadow-lift;
+    transform: translateY(-2px);
+  }
+
+  .card-interactive:active {
+    transform: scale(0.995);
+  }
+
+  .glass-sidebar {
+    background: rgba(255, 255, 255, 0.65);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-right: 1px solid rgba(0, 0, 0, 0.04);
+  }
+
+  /* macOS 风格磨砂控制条：叠在黑色监看容器底部。 */
+  .glass-toolbar {
+    background: rgba(28, 28, 30, 0.62);
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+    backdrop-filter: blur(16px) saturate(160%);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+
+  /* 玻璃面板：浅色背景上的 Contract Armor 卡片。 */
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.72);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgba(0, 0, 0, 0.04);
+    box-shadow:
+      0 4px 24px -4px rgba(0, 0, 0, 0.04),
+      0 1px 2px 0 rgba(0, 0, 0, 0.02);
+  }
+
+  /* 只读 Switch（数据来自契约，不提供写操作）。 */
+  .switch-track {
+    @apply relative inline-flex h-[26px] w-[44px] shrink-0 items-center rounded-full transition-colors duration-200;
+  }
+
+  .switch-knob {
+    @apply absolute left-[3px] h-5 w-5 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.2)] transition-transform duration-200;
+  }
+
+  /* 只读 range：仍显示真实值位置，但不可拖动。 */
+  .range-readonly {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 999px;
+    background: #e5e5ea;
+    outline: none;
+    cursor: default;
+  }
+
+  .range-readonly::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  }
+
+  .range-readonly::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  }
+
+  .glass-dark {
+    background: linear-gradient(155deg, rgba(48, 48, 51, 0.97) 0%, rgba(28, 28, 30, 0.985) 52%, rgba(18, 18, 20, 1) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.11),
+      0 8px 24px rgba(17, 24, 39, 0.16);
+  }
+
+  .skeleton {
+    background-image: linear-gradient(100deg, #efeff2 24%, #f9f9fb 42%, #efeff2 60%);
+    background-size: 220% 100%;
+    animation: shimmer 1.5s linear infinite;
+  }
+
+  .label {
+    @apply text-[13px] font-medium leading-5 text-apple-subtext;
+  }
+
+  .press {
+    @apply transition-transform duration-150 ease-apple active:scale-[0.995];
+  }
+
+  .split-range {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    cursor: ew-resize;
+    opacity: 0;
+    z-index: 30;
+  }
+
+  .split-range:focus-visible ~ .split-handle {
+    outline: 3px solid rgba(0, 113, 227, 0.6);
+    outline-offset: 3px;
+  }
+
+  .split-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 20;
+    width: 2px;
+    transform: translateX(-1px);
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.18);
+    pointer-events: none;
+  }
+
+  .split-handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 30px;
+    height: 30px;
+    transform: translate(-50%, -50%);
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  }
+
+  .split-handle::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 1;
+    width: 8px;
+    height: 8px;
+    transform: translate(-50%, -50%);
+    border-left: 1.5px solid #1d1d1f;
+    border-right: 1.5px solid #1d1d1f;
+  }
+
+  .num {
+    @apply font-mono tabular-nums;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .page-enter {
+    /* 用 backwards 而非 both：动画结束后 transform 回到 none，
+       否则 translateY(0) 会一直保留，给页面内 position:fixed 的对话框
+       造出错误包含块（390 下弹窗被压到内容区宽度并移出视口）。 */
+    animation: page-enter 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  }
+
+  /* 首屏卡片入场：只动 transform / opacity，最多 6 项。 */
+  [data-stagger] > * {
+    /* backwards：入场结束后释放 transform，避免锁死 hover 抬升 */
+    animation: rise-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  }
+
+  [data-stagger] > *:nth-child(2) {
+    animation-delay: 40ms;
+  }
+
+  [data-stagger] > *:nth-child(3) {
+    animation-delay: 80ms;
+  }
+
+  [data-stagger] > *:nth-child(4) {
+    animation-delay: 120ms;
+  }
+
+  [data-stagger] > *:nth-child(5) {
+    animation-delay: 160ms;
+  }
+
+  [data-stagger] > *:nth-child(6) {
+    animation-delay: 200ms;
+  }
+
+  .popover-surface {
+    animation: popover-in 170ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  .popover-closing {
+    animation: popover-out 140ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  .dialog-overlay {
+    animation: fade-in 160ms ease-out both;
+  }
+
+  .dialog-overlay-closing {
+    animation: fade-out 140ms ease-in both;
+  }
+
+  .dialog-panel {
+    animation: dialog-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  .dialog-panel-closing {
+    animation: dialog-out 140ms ease-in both;
+  }
+
+  /* #110 issue 详情右侧抽屉（移动端为底部 sheet）。 */
+  .drawer-panel {
+    animation: drawer-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  /* 新建 issue 高亮：2.4s 淡蓝底 + 描边后消退。 */
+  .highlight-flash {
+    animation: highlight-flash 2.4s ease-out both;
+  }
+
+  .chart-line {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: chart-draw 350ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  }
+
+  .gantt-bar {
+    transform-origin: left center;
+    animation: gantt-grow 300ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -220% 0;
+  }
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes popover-out {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes dialog-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (min-width: 640px) {
+  @keyframes drawer-in {
+    from {
+      opacity: 0.6;
+      transform: translateX(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+}
+
+@keyframes highlight-flash {
+  0% {
+    background-color: #eaf3ff;
+    box-shadow: inset 0 0 0 2px rgba(0, 113, 227, 0.4);
+  }
+  70% {
+    background-color: #f2f7ff;
+    box-shadow: inset 0 0 0 2px rgba(0, 113, 227, 0.16);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 0 rgba(0, 113, 227, 0);
+  }
+}
+
+@keyframes chart-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes gantt-grow {
+  from {
+    opacity: 0;
+    transform: scaleX(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+/* flow 拓扑：执行中节点的低饱和脉冲（仅透明度，reduced-motion 由下方全局规则关掉）。 */
+@keyframes flow-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.flow-node-pulse {
+  animation: flow-pulse 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 打印（T-WEB-015d2b）：只留页面正文与完整表格。
+ * 隐藏侧栏 / 顶栏 / 页脚 / 操作按钮，去掉背景与卡片阴影。
+ * ------------------------------------------------------------------------- */
+@media print {
+  body {
+    background: #fff !important;
+    background-image: none !important;
+  }
+
+  aside,
+  footer,
+  button,
+  [data-print-hide],
+  [data-print-hide] * {
+    display: none !important;
+  }
+
+  [class*='lg:pl-['] {
+    padding-left: 0 !important;
+  }
+
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  .page-enter {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .card {
+    box-shadow: none !important;
+    border-color: #d8d8dd !important;
+    break-inside: avoid;
+  }
+
+  [data-testid='qc-jobs'] .overflow-x-auto {
+    overflow: visible !important;
+  }
+
+  table {
+    width: 100% !important;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tr {
+    break-inside: avoid;
+  }
+}

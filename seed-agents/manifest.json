@@ -1,0 +1,434 @@
+[
+  {
+    "type": "skill",
+    "id": "seed-codebase-map",
+    "file": "skills/seed-codebase-map.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "79ae0708e1d7ec46fbf3c66f3e89fc0d648c7618fcfb5778fc2d975631bd84a8"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-convergence-orchestration",
+    "file": "skills/seed-convergence-orchestration.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "8d855ec952f506607d2615b43535cafe836186d990e8cdcf5e887e2164a3a717"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-design-taste-frontend",
+    "file": "skills/seed-design-taste-frontend.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "ee847084e58f5a81a46120912be9cd15f083570a6ca8f3d1a30372a720633043"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-dev-cookbook",
+    "file": "skills/seed-dev-cookbook.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "e8e654aa9e5dd9ceebf5be45b69fe0134ce2385a88aae23e676879251fb42649"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-core",
+    "file": "skills/seed-gsap-core.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "3887b47e050ab5afbe2a9a820f23d39fa02ab785e06a343be44c6f91d84d12b3"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-frameworks",
+    "file": "skills/seed-gsap-frameworks.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "842d9d3659ec3ddc8abbdc524708f8facf81f468ac25d0577f48c759c4fa31e6"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-performance",
+    "file": "skills/seed-gsap-performance.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "cb5408d6fba707aabcbfe3320317a14c1f8fca6070074e5261047930f50d441e"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-plugins",
+    "file": "skills/seed-gsap-plugins.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "5838b856c74c07fbc9fa99b6dfd1eee34ea554c3e530c30e0d58014b707d70a4"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-react",
+    "file": "skills/seed-gsap-react.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "88e2a5312b45e8cc7b3c496637ff5bc9af2ae9c925b555c8b235b34cbc989d74"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-scrolltrigger",
+    "file": "skills/seed-gsap-scrolltrigger.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "9351b6666a4749c0740406ea363aaccb99a087ff45cc5e8b99a0f367facf3ef4"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-timeline",
+    "file": "skills/seed-gsap-timeline.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "1a8b0f39cc4be3ed3d834b89672e4ae2f151b901dc3450bebf10bbc45379fe02"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-gsap-utils",
+    "file": "skills/seed-gsap-utils.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "1927bcc4ea95b38203404ad5ea1d060b15c4a886c65ae53e885ff1793aabe0ba"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-impeccable",
+    "file": "skills/seed-impeccable.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "4ec904dee7a3cb223c06f01bba72cb77e5b5ffa80cab9272101cda5ac9a7e6d1"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-kex-video-pipeline",
+    "file": "skills/seed-kex-video-pipeline.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "619b25f296f140018080c4fa59bc0cf20c4a2cb8fd041798cb0d0423bf77eca6"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-receiving-code-review",
+    "file": "skills/seed-receiving-code-review.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "85fcbd8d16443a25c12131b0282cdee62323faa6119475dd0ca127749914e80b"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-repo-audit",
+    "file": "skills/seed-repo-audit.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "152241fac087d4ab037f85eeb98a3ce14a21434a4e21733313eb9be559dd388f"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-rpa-flow-fix",
+    "file": "skills/seed-rpa-flow-fix.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "b4d54a3c809236620042066be72bcb68af4df2c3f87de00679868871e6bc5e1f"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-show-tasks",
+    "file": "skills/seed-show-tasks.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "d2770397258ec570d55987d2629707fbcf447530d55495b1752fe200a9f7dea6"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-web-tester",
+    "file": "skills/seed-web-tester.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "a267212c78fd4a64e79c6eb06f480c7fa22ee7866ab8d036d2c4eea56b58ac88"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-website-security-assessment",
+    "file": "skills/seed-website-security-assessment.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "4e525dccc1001f1c8743ce0c243070505c831afdc59a7203e9aa8d97a32c6e8b"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-acceptance-tester",
+    "file": "agents/seed-acceptance-tester.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "251c1ce970dd335445000722182911f1e54615ca64a73bbf40e6e0a933f29894"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-dev",
+    "file": "agents/seed-dev.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "64233661b907d412e60f2f3f1dd4f3216505fdd1c5ea2f98795edf7d6f48eb5f"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-lofa-dev",
+    "file": "agents/seed-lofa-dev.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "b3c53f147ed594152a82dc579340afc12eab6fc3aca3c842ce032f0a140f4f0c"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-memory-architect",
+    "file": "agents/seed-memory-architect.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "2a465df2e862e4b98d29751b1fe23377724a11c1d6d8809b43f201841bd99980"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-memory-dev",
+    "file": "agents/seed-memory-dev.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "7c04d00618fa6492f59100cc3596dd76d62d4ba61f8fa22c957ecd6b63a0ad3d"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-plan-dev",
+    "file": "agents/seed-plan-dev.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "bc7d6c639cb05226b6ad3e2e0c108e881bfdc06dc1b6db2d3697ed826c6d4c21"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-reviewer",
+    "file": "agents/seed-reviewer.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "c5568633fbf10b21700c759161c87b6dc124ba3cf7ca2b8fbc94ba85a15f1810"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-solution-architect",
+    "file": "agents/seed-solution-architect.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "c6038b5731b8d2872aff5534b73e59d98173fdf55111acc8af9bba1bde661b4d"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-task-runner",
+    "file": "agents/seed-task-runner.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "11e0279e5a0bcc911ea0148c67e179e80016659ea05ce09673f62062f47e07fd"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-ui-dev",
+    "file": "agents/seed-ui-dev.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "66dbc639189f5635b44907f5ea7fcb167b1969ae2ac3271a046b4156e3334e22"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-video-dev",
+    "file": "agents/seed-video-dev.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "0f19b90f2ea65fea1cc16c464177d0a011810523b63d080c30ade8bcb831402c"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-mastermind-plan",
+    "file": "agents/seed-mastermind-plan.md",
+    "source": {
+      "kind": "local",
+      "repo": "opencode-config",
+      "commit": null,
+      "license": "internal",
+      "sha256": "666374c8c93f6b24ca8b77ece10f913638d9cd7c734280d1355328f95817cad4"
+    }
+  },
+  {
+    "type": "profile",
+    "id": "seed-ad-teal-orange",
+    "file": "profiles/seed-ad-teal-orange.json",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal",
+      "sha256": "28ec1d0afa456dde142291d4bdc46db7ecfb03dde0cba7dc9d8e5a3d4fe48df5"
+    }
+  },
+  {
+    "type": "profile",
+    "id": "seed-doc-neutral",
+    "file": "profiles/seed-doc-neutral.json",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal",
+      "sha256": "def3a9720ef184de66a0feab3327f6f92cb41da4ab01a67882aad7ffd6833f81"
+    }
+  },
+  {
+    "type": "profile",
+    "id": "seed-landscape-low-sat",
+    "file": "profiles/seed-landscape-low-sat.json",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal",
+      "sha256": "5afa94bdeb5ce009e1e0f1799252485e831fe900ad0ad9672ae2839926bd9f76"
+    }
+  },
+  {
+    "type": "profile",
+    "id": "seed-vlog-warm-film",
+    "file": "profiles/seed-vlog-warm-film.json",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal",
+      "sha256": "ac0746268fd0ebca56233ecadc24598bfc82ce93a320617217fdceadb084f206"
+    }
+  }
+]

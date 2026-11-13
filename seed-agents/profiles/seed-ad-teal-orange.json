@@ -1,0 +1,1 @@
+{"human": {"grain": 0.05, "handheld": false, "jitter_px": 1, "pacing_bias": 0.15, "vignette": 0.1}, "label": "广告商业", "lut": "looks/ad_teal_orange.cube", "prompt": "prompts/ad_teal_orange.v1.txt", "prompt_version": "v1"}

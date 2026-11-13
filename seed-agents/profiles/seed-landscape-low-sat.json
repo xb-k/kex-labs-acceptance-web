@@ -1,0 +1,1 @@
+{"human": {"grain": 0.03, "handheld": false, "jitter_px": 0, "pacing_bias": -0.2, "vignette": 0.08}, "label": "风景大片", "lut": "looks/landscape_low_sat.cube", "prompt": "prompts/landscape_low_sat.v1.txt", "prompt_version": "v1"}
