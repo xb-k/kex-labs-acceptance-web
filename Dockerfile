@@ -11,6 +11,9 @@ RUN npm run build && npm run build:server
 
 # Runtime stage: only the built SPA and the single-file server.
 FROM node:22-alpine
+# B-rail needs ffprobe/ffmpeg at runtime (server/video-optimize.ts spawns them).
+# The alpine `ffmpeg` package ships both binaries. (#148)
+RUN apk add --no-cache ffmpeg
 WORKDIR /app
 ENV NODE_ENV=production \
     WEB_DATA_ROOT=/data \
