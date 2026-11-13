@@ -10,6 +10,18 @@ import {
 } from '../agents'
 import { AgentDetailPanel } from '../components/agents/AgentDetailPanel'
 import { ConfirmDialog, ImportDialog } from '../components/agents/AgentDialogs'
+import { AgentLibraryList, AgentSyncCard } from '../components/agents/AgentSyncPanel'
+import {
+  LIBRARY_PAGE_SIZE,
+  SYNC_POLL_INTERVAL_MS,
+  SYNC_POLL_LIMIT_MS,
+  describeSyncCounts,
+  getAgentSyncStatus,
+  listAgentLibrary,
+  startAgentLibrarySync,
+  type AgentLibraryPage,
+  type AgentSyncStatus
+} from '../agent-library'
 import {
   HOST_GROUPS,
   PROJECT_GROUPS,
@@ -82,6 +94,15 @@ export function AgentsPage() {
   const [seedStartedAt, setSeedStartedAt] = useState<number | null>(null)
   const [seedError, setSeedError] = useState<string | null>(null)
   const [syncingGithub, setSyncingGithub] = useState(false)
+  // #133 GitHub 只读清单：status 卡 + 分页清单；同步是后台任务，页面只轮询状态。
+  const [syncStatus, setSyncStatus] = useState<AgentSyncStatus | null>(null)
+  const [syncStarting, setSyncStarting] = useState(false)
+  const [syncStartedAt, setSyncStartedAt] = useState<number | null>(null)
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const [library, setLibrary] = useState<AgentLibraryPage | null>(null)
+  const [libraryLoading, setLibraryLoading] = useState(true)
+  const [libraryMore, setLibraryMore] = useState(false)
+  const [libraryError, setLibraryError] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [toolbarError, setToolbarError] = useState<string | null>(null)
@@ -98,6 +119,7 @@ export function AgentsPage() {
   const pinnedSelection = useRef<{ type: AgentType; id: string } | null>(null)
   const autoSeedChecked = useRef(false)
   const detailSectionRef = useRef<HTMLElement>(null)
+  const syncStartedAtRef = useRef<number | null>(null)
 
   // 同步筛选与选中态到 URL search params
   useEffect(() => {
@@ -267,6 +289,98 @@ export function AgentsPage() {
   function refreshAll() {
     setListKey((key) => key + 1)
     setDetailKey((key) => key + 1)
+  }
+
+  // #133 清单分页：append=true 时把新页拼到已显示条目之后。
+  const loadLibrary = useCallback((offset: number, append: boolean) => {
+    if (append) setLibraryMore(true)
+    else setLibraryLoading(true)
+    return listAgentLibrary({ limit: LIBRARY_PAGE_SIZE, offset })
+      .then((page) => {
+        setLibrary((prev) =>
+          append && prev ? { ...page, items: [...prev.items, ...page.items] } : page
+        )
+        setLibraryError(null)
+      })
+      .catch((err: unknown) => setLibraryError(describeError(err)))
+      .finally(() => {
+        setLibraryLoading(false)
+        setLibraryMore(false)
+      })
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    getAgentSyncStatus()
+      .then((status) => {
+        if (alive) setSyncStatus(status)
+      })
+      .catch((err: unknown) => {
+        if (alive) setSyncError(describeError(err))
+      })
+    loadLibrary(0, false)
+    return () => {
+      alive = false
+    }
+  }, [loadLibrary])
+
+  // 后端同步是后台任务：POST 只回 202，页面按 2s 轮询到 running=false（上限 5 分钟）。
+  // 依赖只用 running 布尔值，避免每次 setSyncStatus 都重建定时器。
+  useEffect(() => {
+    if (!syncStatus?.running) return
+    let alive = true
+    const serverStart = syncStatus.started_at ? Date.parse(syncStatus.started_at) : Number.NaN
+    const startedAtMs = syncStartedAtRef.current ?? (Number.isNaN(serverStart) ? Date.now() : serverStart)
+    const timer = window.setInterval(() => {
+      if (Date.now() - startedAtMs > SYNC_POLL_LIMIT_MS) {
+        window.clearInterval(timer)
+        setSyncError('同步已超过 5 分钟，页面停止轮询；稍后可刷新查看结果。')
+        return
+      }
+      getAgentSyncStatus()
+        .then((next) => {
+          if (!alive) return
+          setSyncStatus(next)
+          setSyncError(null)
+          if (!next.running) {
+            window.clearInterval(timer)
+            syncStartedAtRef.current = null
+            setSyncStartedAt(null)
+            const counts = describeSyncCounts(next.counts, next.errors.length)
+            notify(next.errors.length > 0 ? `同步结束（有错误）：${counts.text}` : `同步完成：${counts.text}`)
+            void loadLibrary(0, false)
+          }
+        })
+        .catch((err: unknown) => {
+          if (alive) setSyncError(describeError(err))
+        })
+    }, SYNC_POLL_INTERVAL_MS)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncStatus?.running])
+
+  async function startSync() {
+    if (syncStarting) return
+    setSyncStarting(true)
+    setSyncError(null)
+    const startedAt = Date.now()
+    syncStartedAtRef.current = startedAt
+    setSyncStartedAt(startedAt)
+    try {
+      const res = await startAgentLibrarySync()
+      if (!res.started) notify('已有同步在跑，继续等待结果')
+      const status = await getAgentSyncStatus()
+      setSyncStatus(status)
+    } catch (err) {
+      syncStartedAtRef.current = null
+      setSyncStartedAt(null)
+      setSyncError(describeError(err))
+    } finally {
+      setSyncStarting(false)
+    }
   }
 
   function selectItem(item: AgentItem) {
@@ -452,6 +566,25 @@ export function AgentsPage() {
           </p>
         </div>
       </header>
+
+      <AgentSyncCard
+        status={syncStatus}
+        starting={syncStarting}
+        startedAt={syncStartedAt}
+        error={syncError}
+        onStart={() => void startSync()}
+      />
+
+      <AgentLibraryList
+        entries={library?.items ?? []}
+        total={library?.total ?? 0}
+        loading={libraryLoading}
+        loadingMore={libraryMore}
+        error={libraryError}
+        generatedAt={library?.generated_at ?? null}
+        onLoadMore={() => void loadLibrary(library?.items.length ?? 0, true)}
+        onRetry={() => void loadLibrary(0, false)}
+      />
 
       {(autoSeeding || seeding || seedError) && (
         <div className="space-y-2">
