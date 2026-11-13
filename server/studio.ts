@@ -82,6 +82,8 @@ export interface Job {
   keyframe_source: string | null
   /** #89d: `{source_job, name}` read-back; never an absolute studio path. */
   keyframe_asset: { source_job: string; name: string } | null
+  /** #157: same real duration as the list summary (detail must not omit it). */
+  duration_ms: number | null
 }
 
 /** #89b: a reference to an artifact without exposing the studio filesystem. */
@@ -1149,6 +1151,23 @@ export function keyframeRefFromPath(raw: unknown): { source_job: string; name: s
   return { source_job: '', name }
 }
 
+/**
+ * #157: keyframe provenance. Explicit intake values win (detail, then state);
+ * old jobs wrote nothing, so derive from the asset plus the source input:
+ * keyframe without input → `keyframe_only`, input + keyframe → `injected`.
+ */
+export function resolveKeyframeSource(
+  detail: any,
+  state: any,
+  hasKeyframe: boolean,
+  hasInput: boolean
+): string | null {
+  if (typeof detail?.keyframe_source === 'string') return detail.keyframe_source
+  if (typeof state?.keyframe_source === 'string') return state.keyframe_source
+  if (!hasKeyframe) return null
+  return hasInput ? 'injected' : 'keyframe_only'
+}
+
 export function buildStudioJob(ctx: StudioContext, id: string, detail: any): Job {
   const meta = readJobMeta(ctx, id)
   const status = studioStatus(detail?.state)
@@ -1159,6 +1178,9 @@ export function buildStudioJob(ctx: StudioContext, id: string, detail: any): Job
   const { assets, outputs } = collectAssets(id, meta, artifacts)
   const sourceId = meta?.input ? `asset_${id}_source` : null
   const cover = assetRefFromPath(detail?.cover_asset)
+  const keyframeAsset = keyframeRefFromPath(detail?.keyframe_asset ?? detail?.keyframe_asset_used)
+  // #157: `upload_id` counts as a source input too (studio reads it from meta).
+  const hasInput = Boolean(sourceId || meta?.upload_id)
   return {
     id,
     type: meta?.type ?? 'aigc',
@@ -1184,15 +1206,15 @@ export function buildStudioJob(ctx: StudioContext, id: string, detail: any): Job
     },
     cover_asset: cover,
     cover_url: cover?.url ?? null,
-    keyframe_asset: keyframeRefFromPath(
-      detail?.keyframe_asset ?? detail?.keyframe_asset_used
+    keyframe_asset: keyframeAsset,
+    keyframe_source: resolveKeyframeSource(
+      detail,
+      detail?.state,
+      keyframeAsset !== null,
+      hasInput
     ),
-    keyframe_source:
-      typeof detail?.keyframe_source === 'string'
-        ? detail.keyframe_source
-        : typeof detail?.state?.keyframe_source === 'string'
-          ? detail.state.keyframe_source
-          : null
+    // #157: the detail endpoint now carries the same duration as the list.
+    duration_ms: resolveJobDurationMs(detail, meta?.created_at ?? null)
   }
 }
 

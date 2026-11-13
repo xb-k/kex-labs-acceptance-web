@@ -37,6 +37,16 @@ function DetailSection({ title, children }: { title: string; children: ReactNode
   )
 }
 
+/**
+ * #157: one label per keyframe provenance. Legacy jobs carry an asset but no
+ * source, so they still read 「已注入关键帧」 instead of contradicting it.
+ */
+function keyframeSourceLabel(detail: StudioJob): string {
+  if (detail.keyframe_source === 'keyframe_only') return '仅关键帧生成底片'
+  if (detail.keyframe_source || detail.keyframe_asset) return '已注入关键帧'
+  return '未使用关键帧'
+}
+
 export function StudioJobDetail({
   job,
   detail,
@@ -161,12 +171,18 @@ export function StudioJobDetail({
               <p className="text-[11px] text-apple-subtext">未设置封面（cover_asset 为空）。</p>
             )}
             <p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
-              {detail.keyframe_source ? (
-                <span className="inline-flex rounded-full bg-[#EAF2FD] px-2 py-0.5 text-apple-blueInk ring-1 ring-inset ring-[#CFE2FA]">
-                  keyframe_source=<span className="num ml-0.5">{detail.keyframe_source}</span>
+              {detail.keyframe_source || detail.keyframe_asset ? (
+                <span
+                  className="inline-flex rounded-full bg-[#EAF2FD] px-2 py-0.5 text-apple-blueInk ring-1 ring-inset ring-[#CFE2FA]"
+                  data-testid="studio-keyframe-source"
+                  title={detail.keyframe_source ?? undefined}
+                >
+                  {keyframeSourceLabel(detail)}
                 </span>
               ) : (
-                <span className="text-apple-subtext">keyframe_source 为空（未使用注入关键帧）。</span>
+                <span className="text-apple-subtext" data-testid="studio-keyframe-source">
+                  未使用关键帧
+                </span>
               )}
               {detail.keyframe_asset && (
                 <span className="num break-all text-apple-subtext">
