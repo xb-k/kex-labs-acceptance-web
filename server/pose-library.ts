@@ -1,0 +1,440 @@
+/**
+ * #138 姿态参考库（pose library）后端。
+ *
+ * 数据落在 `WEB_DATA_ROOT/pose-library/entries.json`（顶层数组，原子写）。
+ * 入库前置是 license：协议必须在白名单内，且必须给出 https 的授权证据链接；
+ * 来源不明 / 证据缺失一律 400 `license_unverified`，不做「先入库再补证」。
+ *
+ * 契约：
+ *  - 必填 `label_zh`（含中文、≤60 字）、`source_url`（https）、`license`、
+ *    `license_evidence_url`（https）；`license_verified` 由服务端派生为 true；
+ *  - `source_url` 归一化后唯一，重复入库 409 `duplicate_source_url`；
+ *  - `preview_url` 可选：https，或以 `/` 开头的本服务数据路径；
+ *  - `suitable_shots` 仅限枚举值；`tags` 最多 10 个；
+ *  - id / created_at 由服务端生成，不信任客户端。
+ */
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+
+export const POSE_LICENSES = [
+  'CC0',
+  'CC-BY-4.0',
+  'CC-BY-SA-4.0',
+  'MIT',
+  'Apache-2.0',
+  'OWNED'
+] as const
+export type PoseLicense = (typeof POSE_LICENSES)[number]
+
+export const SUITABLE_SHOTS = ['closeup', 'medium', 'wide', 'full_body', 'action'] as const
+export type SuitableShot = (typeof SUITABLE_SHOTS)[number]
+
+export const LABEL_MAX = 60
+export const TAGS_MAX = 10
+export const NOTE_MAX = 500
+export const LIST_LIMIT_DEFAULT = 20
+export const LIST_LIMIT_MAX = 100
+
+export type PoseEntry = {
+  id: string
+  label_zh: string
+  preview_url: string | null
+  source_url: string
+  license: PoseLicense
+  license_evidence_url: string
+  license_verified: boolean
+  suitable_shots: SuitableShot[]
+  tags: string[]
+  note: string
+  created_at: string
+}
+
+export type PoseEntryInput = Omit<PoseEntry, 'id' | 'license_verified' | 'created_at'>
+
+export type ValidationResult =
+  | { ok: true; value: PoseEntryInput }
+  | { ok: false; status: 400; error: string }
+
+export function poseLibraryDir(dataRoot: string): string {
+  return path.join(dataRoot, 'pose-library')
+}
+
+export function poseLibraryFile(dataRoot: string): string {
+  return path.join(poseLibraryDir(dataRoot), 'entries.json')
+}
+
+function isHttpsUrl(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false
+  try {
+    const url = new URL(value.trim())
+    return url.protocol === 'https:' && Boolean(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * `source_url` 去重键：去掉 hash、统一小写 host、去掉根路径以外的尾斜杠。
+ * 查询串保持原样（不同 query 可能指向不同素材）。
+ */
+export function normalizeSourceUrl(raw: string): string {
+  const url = new URL(raw.trim())
+  url.hash = ''
+  let pathname = url.pathname
+  if (pathname.length > 1) pathname = pathname.replace(/\/+$/, '')
+  return `${url.protocol}//${url.host}${pathname}${url.search}`
+}
+
+function sourceKey(raw: string): string {
+  try {
+    return normalizeSourceUrl(raw)
+  } catch {
+    return raw.trim()
+  }
+}
+
+function isValidPreviewUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  return isHttpsUrl(trimmed) || (trimmed.startsWith('/') && !trimmed.startsWith('//') && trimmed.length > 1)
+}
+
+export function validatePoseInput(body: unknown): ValidationResult {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, status: 400, error: 'invalid_body' }
+  }
+  const input = body as Record<string, unknown>
+
+  // license 是入库前置：未知协议 / 缺证据 / 证据非 https 一律拒绝。
+  const license = typeof input.license === 'string' ? input.license.trim() : ''
+  const evidence =
+    typeof input.license_evidence_url === 'string' ? input.license_evidence_url.trim() : ''
+  if (
+    !POSE_LICENSES.includes(license as PoseLicense) ||
+    !isHttpsUrl(evidence) ||
+    input.license_verified === false
+  ) {
+    return { ok: false, status: 400, error: 'license_unverified' }
+  }
+
+  const label = typeof input.label_zh === 'string' ? input.label_zh.trim() : ''
+  if (!label || [...label].length > LABEL_MAX || !/[\u3400-\u9fff]/.test(label)) {
+    return { ok: false, status: 400, error: 'label_zh_invalid' }
+  }
+
+  const sourceUrl = typeof input.source_url === 'string' ? input.source_url.trim() : ''
+  if (!isHttpsUrl(sourceUrl)) {
+    return { ok: false, status: 400, error: 'source_url_invalid' }
+  }
+
+  const previewRaw = input.preview_url
+  if (previewRaw !== undefined && previewRaw !== null && previewRaw !== '' && !isValidPreviewUrl(previewRaw)) {
+    return { ok: false, status: 400, error: 'preview_url_invalid' }
+  }
+
+  let suitable: SuitableShot[] = []
+  if (input.suitable_shots !== undefined) {
+    if (!Array.isArray(input.suitable_shots)) {
+      return { ok: false, status: 400, error: 'suitable_shots_invalid' }
+    }
+    const seen = new Set<string>()
+    for (const shot of input.suitable_shots) {
+      if (typeof shot !== 'string' || !SUITABLE_SHOTS.includes(shot as SuitableShot)) {
+        return { ok: false, status: 400, error: 'suitable_shots_invalid' }
+      }
+      seen.add(shot)
+    }
+    suitable = SUITABLE_SHOTS.filter((shot) => seen.has(shot))
+  }
+
+  let tags: string[] = []
+  if (input.tags !== undefined) {
+    if (!Array.isArray(input.tags)) {
+      return { ok: false, status: 400, error: 'tags_invalid' }
+    }
+    const seen = new Set<string>()
+    for (const tag of input.tags) {
+      if (typeof tag !== 'string') return { ok: false, status: 400, error: 'tags_invalid' }
+      const trimmed = tag.trim()
+      if (!trimmed) return { ok: false, status: 400, error: 'tags_invalid' }
+      seen.add(trimmed)
+    }
+    if (seen.size > TAGS_MAX) {
+      return { ok: false, status: 400, error: 'tags_invalid' }
+    }
+    tags = [...seen]
+  }
+
+  let note = ''
+  if (input.note !== undefined) {
+    if (typeof input.note !== 'string') return { ok: false, status: 400, error: 'note_invalid' }
+    note = input.note.trim()
+    if ([...note].length > NOTE_MAX) return { ok: false, status: 400, error: 'note_invalid' }
+  }
+
+  return {
+    ok: true,
+    value: {
+      label_zh: label,
+      preview_url:
+        typeof previewRaw === 'string' && previewRaw.trim() ? previewRaw.trim() : null,
+      source_url: sourceUrl,
+      license: license as PoseLicense,
+      license_evidence_url: evidence,
+      suitable_shots: suitable,
+      tags,
+      note
+    }
+  }
+}
+
+export function readPoseEntries(dataRoot: string, readJson: (file: string) => any | null): PoseEntry[] {
+  const raw = readJson(poseLibraryFile(dataRoot))
+  if (Array.isArray(raw)) return raw as PoseEntry[]
+  if (raw && typeof raw === 'object' && Array.isArray((raw as { entries?: unknown }).entries)) {
+    return (raw as { entries: PoseEntry[] }).entries
+  }
+  return []
+}
+
+/** 临时文件 + rename，保证读侧永远看到完整 JSON。 */
+export function writeJsonAtomic(file: string, value: unknown): void {
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n', 'utf8')
+  fs.renameSync(tmp, file)
+}
+
+// 同进程内串行化 read-modify-write，避免并发 POST 互相覆盖。
+const writeQueues = new Map<string, Promise<unknown>>()
+
+function withFileLock<T>(file: string, fn: () => T | Promise<T>): Promise<T> {
+  const previous = writeQueues.get(file) ?? Promise.resolve()
+  const next = previous.catch(() => undefined).then(fn)
+  writeQueues.set(file, next)
+  return next.finally(() => {
+    if (writeQueues.get(file) === next) writeQueues.delete(file)
+  })
+}
+
+export type AddPoseResult =
+  | { ok: true; item: PoseEntry }
+  | { ok: false; status: 409; error: 'duplicate_source_url' }
+
+export async function addPoseEntry(opts: {
+  dataRoot: string
+  value: PoseEntryInput
+  readJson: (file: string) => any | null
+  atomicWriteJson: (file: string, value: unknown) => void
+  now?: () => Date
+}): Promise<AddPoseResult> {
+  const file = poseLibraryFile(opts.dataRoot)
+  const key = sourceKey(opts.value.source_url)
+  return withFileLock(file, () => {
+    const entries = readPoseEntries(opts.dataRoot, opts.readJson)
+    if (entries.some((entry) => sourceKey(String(entry.source_url ?? '')) === key)) {
+      return { ok: false, status: 409, error: 'duplicate_source_url' }
+    }
+    const item: PoseEntry = {
+      id: `pose_${crypto.randomUUID()}`,
+      ...opts.value,
+      license_verified: true,
+      created_at: (opts.now?.() ?? new Date()).toISOString()
+    }
+    opts.atomicWriteJson(file, [...entries, item])
+    return { ok: true, item }
+  })
+}
+
+export async function deletePoseEntry(opts: {
+  dataRoot: string
+  id: string
+  readJson: (file: string) => any | null
+  atomicWriteJson: (file: string, value: unknown) => void
+}): Promise<PoseEntry | null> {
+  const file = poseLibraryFile(opts.dataRoot)
+  return withFileLock(file, () => {
+    const entries = readPoseEntries(opts.dataRoot, opts.readJson)
+    const index = entries.findIndex((entry) => entry.id === opts.id)
+    if (index < 0) return null
+    const [removed] = entries.splice(index, 1)
+    opts.atomicWriteJson(file, entries)
+    return removed
+  })
+}
+
+export type PoseLibraryQuery = {
+  q: string
+  license: string
+  shot: string
+  limit: number
+  offset: number
+}
+
+export type PoseLibraryFilterResult =
+  | { ok: true; items: PoseEntry[]; total: number; limit: number; offset: number }
+  | { ok: false; status: 400; error: string }
+
+function parseNonNegativeInt(raw: string | null, fallback: number): number | null {
+  if (raw === null || raw === '') return fallback
+  const n = Number(raw)
+  return Number.isSafeInteger(n) && n >= 0 ? n : null
+}
+
+export function filterPoseEntries(entries: PoseEntry[], query: PoseLibraryQuery): PoseLibraryFilterResult {
+  if (query.license && !POSE_LICENSES.includes(query.license as PoseLicense)) {
+    return { ok: false, status: 400, error: 'license_invalid' }
+  }
+  if (query.shot && !SUITABLE_SHOTS.includes(query.shot as SuitableShot)) {
+    return { ok: false, status: 400, error: 'shot_invalid' }
+  }
+  if (query.limit > LIST_LIMIT_MAX) {
+    query = { ...query, limit: LIST_LIMIT_MAX }
+  }
+
+  const needle = query.q.trim().toLowerCase()
+  const matched = entries
+    .slice()
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .filter((entry) => {
+      if (query.license && entry.license !== query.license) return false
+      if (query.shot && !entry.suitable_shots.includes(query.shot as SuitableShot)) return false
+      if (!needle) return true
+      const haystack = [entry.label_zh, entry.note, ...(entry.tags ?? [])].join('\n').toLowerCase()
+      return haystack.includes(needle)
+    })
+
+  return {
+    ok: true,
+    items: matched.slice(query.offset, query.offset + query.limit),
+    total: matched.length,
+    limit: query.limit,
+    offset: query.offset
+  }
+}
+
+export type PoseLibraryDeps = {
+  dataRoot: string
+  readJson: (file: string) => any | null
+  atomicWriteJson: (file: string, value: unknown) => void
+  readBody: (req: IncomingMessage) => Promise<unknown>
+  authorize: (req: IncomingMessage) => { ok: true } | { ok: false; status: number; error: string }
+  sendJson: (res: ServerResponse, status: number, body: unknown) => void
+  now?: () => Date
+}
+
+function methodNotAllowed(res: ServerResponse, allow: string) {
+  res.statusCode = 405
+  res.setHeader('Allow', allow)
+  res.end()
+}
+
+function parseQuery(url: URL): PoseLibraryQuery | { error: string } {
+  const limit = parseNonNegativeInt(url.searchParams.get('limit'), LIST_LIMIT_DEFAULT)
+  const offset = parseNonNegativeInt(url.searchParams.get('offset'), 0)
+  if (limit === null || offset === null) return { error: 'invalid_pagination' }
+  return {
+    q: (url.searchParams.get('q') ?? '').trim(),
+    license: (url.searchParams.get('license') ?? '').trim(),
+    shot: (url.searchParams.get('shot') ?? '').trim(),
+    limit,
+    offset
+  }
+}
+
+/**
+ * `/api/pose-library` 与 `/api/pose-library/:id`。
+ * 返回 true 表示请求已被本路由处理。
+ */
+export async function handlePoseLibraryRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  pathname: string,
+  deps: PoseLibraryDeps
+): Promise<boolean> {
+  if (pathname === '/api/pose-library') {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const query = parseQuery(url)
+      if ('error' in query) {
+        deps.sendJson(res, 400, { error: query.error })
+        return true
+      }
+      const result = filterPoseEntries(readPoseEntries(deps.dataRoot, deps.readJson), query)
+      if (!result.ok) {
+        deps.sendJson(res, result.status, { error: result.error })
+        return true
+      }
+      deps.sendJson(res, 200, {
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset
+      })
+      return true
+    }
+
+    if (req.method === 'POST') {
+      const auth = deps.authorize(req)
+      if (!auth.ok) {
+        deps.sendJson(res, auth.status, { error: auth.error })
+        return true
+      }
+      let body: unknown
+      try {
+        body = await deps.readBody(req)
+      } catch (err) {
+        deps.sendJson(res, 400, { error: err instanceof Error ? err.message : 'bad body' })
+        return true
+      }
+      const validated = validatePoseInput(body)
+      if (!validated.ok) {
+        deps.sendJson(res, validated.status, { error: validated.error })
+        return true
+      }
+      const added = await addPoseEntry({
+        dataRoot: deps.dataRoot,
+        value: validated.value,
+        readJson: deps.readJson,
+        atomicWriteJson: deps.atomicWriteJson,
+        now: deps.now
+      })
+      if (!added.ok) {
+        deps.sendJson(res, added.status, { error: added.error })
+        return true
+      }
+      deps.sendJson(res, 201, { item: added.item })
+      return true
+    }
+
+    methodNotAllowed(res, 'GET, HEAD, POST')
+    return true
+  }
+
+  const match = /^\/api\/pose-library\/([^/]+)$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'DELETE') {
+    methodNotAllowed(res, 'DELETE')
+    return true
+  }
+  const auth = deps.authorize(req)
+  if (!auth.ok) {
+    deps.sendJson(res, auth.status, { error: auth.error })
+    return true
+  }
+  const removed = await deletePoseEntry({
+    dataRoot: deps.dataRoot,
+    id: match[1],
+    readJson: deps.readJson,
+    atomicWriteJson: deps.atomicWriteJson
+  })
+  if (!removed) {
+    deps.sendJson(res, 404, { error: 'not_found' })
+    return true
+  }
+  deps.sendJson(res, 200, { ok: true, item: removed })
+  return true
+}
