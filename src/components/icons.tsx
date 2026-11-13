@@ -349,3 +349,48 @@ export function Bot({ className }: IconProps) {
     </svg>
   )
 }
+
+export function Sparkles({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M12 3l1.7 4.8L18.5 9.5l-4.8 1.7L12 16l-1.7-4.8L5.5 9.5l4.8-1.7L12 3z" />
+      <path d="M19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2-2.2-.8 2.2-.8L19 15z" />
+    </svg>
+  )
+}
+
+export function Download({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M12 4v11.5M7.5 11l4.5 4.5 4.5-4.5" />
+      <path d="M4.5 16.5v2A2 2 0 006.5 20.5h11a2 2 0 002-2v-2" />
+    </svg>
+  )
+}
+
+export function Copy({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+    </svg>
+  )
+}
+
+export function FileText({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M14 3.5H7a2 2 0 00-2 2v13a2 2 0 002 2h10a2 2 0 002-2V8.5L14 3.5z" />
+      <path d="M14 3.5v5h5M8.5 13h7M8.5 16.5h5" />
+    </svg>
+  )
+}
+
+export function Search({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="M16 16l4.5 4.5" />
+    </svg>
+  )
+}

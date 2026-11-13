@@ -28,12 +28,12 @@ export default {
       },
       fontFamily: {
         sans: [
+          '"Plus Jakarta Sans"',
+          '"PingFang SC"',
           '-apple-system',
           'BlinkMacSystemFont',
           '"SF Pro Text"',
           '"SF Pro Display"',
-          'Inter',
-          '"PingFang SC"',
           '"Helvetica Neue"',
           'Arial',
           'sans-serif'

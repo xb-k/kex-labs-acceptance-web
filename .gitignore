@@ -15,6 +15,8 @@ screenshots/
 
 # local state
 .opencode/state/
+.preview-data/
+.env.preview
 
 # OS
 .DS_Store

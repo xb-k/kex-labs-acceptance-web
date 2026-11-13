@@ -11,6 +11,7 @@ import type {
 } from '../types'
 import { Field, inputClass, primaryButton, quietButton } from './studio-ui'
 import { StudioStatusChip } from './StudioStatusChip'
+import { useInfiniteScrollBatch } from '../hooks'
 import {
   DEFAULT_EDIT_DENOISE,
   DEFAULT_IMAGE_SIZE,
@@ -174,6 +175,7 @@ function GalleryCard({
             src={primary.url}
             alt={item.prompt ? `生成图：${item.prompt}` : `生成图 ${item.id}`}
             loading="lazy"
+            decoding="async"
             className="aspect-[16/9] w-full object-cover"
           />
         ) : (
@@ -205,7 +207,7 @@ function GalleryCard({
               type="button"
               onClick={() => onSelect({ item, image: primary })}
               aria-pressed={selected}
-              className={`rounded-full border px-2.5 py-1 text-[10px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/45 ${
+              className={`rounded-lg border px-2.5 py-1 text-[10px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/45 ${
                 selected
                   ? 'border-apple-blue bg-[#F0F6FF] text-apple-blueInk'
                   : 'border-black/[0.1] bg-white text-apple-text hover:border-black/[0.24]'
@@ -269,6 +271,8 @@ export function ImageWorkbench({
   }, [galleryJob])
   const gallery = useLiveJson<GalleryResponse>(galleryUrl, 4000)
   const items = gallery.data?.items ?? []
+  const galleryBatch = useInfiniteScrollBatch(items.length, 9, 9, galleryJob)
+  const pagedItems = items.slice(0, galleryBatch.visibleCount)
 
   const jobChoices = useMemo(
     () => jobOptions.filter((job) => job.type === 'aigc').slice(0, 50),
@@ -428,7 +432,7 @@ export function ImageWorkbench({
             Qwen-Image 文生图 / 参考图改写。任务异步执行，每 4 秒轮询；产物可设为封面，或注入下一个 A 轨任务的关键帧（v1 仅 shot 1）。
           </p>
         </div>
-        <span className="num rounded-full bg-apple-bg px-2.5 py-1 text-[11px] text-apple-subtext">type=image</span>
+        <span className="num rounded-md bg-apple-bg px-2.5 py-1 text-[11px] text-apple-subtext">type=image</span>
       </div>
 
       <div className="grid gap-5 p-4 xl:grid-cols-[minmax(300px,360px)_minmax(0,1fr)] xl:items-start">
@@ -739,17 +743,38 @@ export function ImageWorkbench({
           )}
 
           {items.length > 0 && (
-            <ul className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-3" aria-label="图片任务 gallery">
-              {items.map((item) => (
-                <GalleryCard
-                  key={item.id}
-                  item={item}
-                  selected={selected?.item.id === item.id && selected.image.name === galleryPrimaryImage(item)?.name}
-                  onSelect={handleSelect}
-                  onPreview={handlePreview}
-                />
-              ))}
-            </ul>
+            <>
+              <ul className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-3" aria-label="图片任务 gallery">
+                {pagedItems.map((item) => (
+                  <GalleryCard
+                    key={item.id}
+                    item={item}
+                    selected={selected?.item.id === item.id && selected.image.name === galleryPrimaryImage(item)?.name}
+                    onSelect={handleSelect}
+                    onPreview={handlePreview}
+                  />
+                ))}
+              </ul>
+              <div
+                ref={galleryBatch.sentinelRef}
+                data-testid="image-gallery-lazy-sentinel"
+                className="flex flex-wrap items-center justify-between gap-2 border-t border-black/[0.06] pt-2 text-[11px] text-apple-subtext"
+              >
+                <span className="num">
+                  已加载 {pagedItems.length} / {items.length} 张产物
+                  {galleryBatch.hasMore ? ' · 向下滚动自动懒加载' : ' · 已全部加载'}
+                </span>
+                {galleryBatch.hasMore && (
+                  <button
+                    type="button"
+                    onClick={galleryBatch.loadMore}
+                    className="rounded-lg border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-apple-text hover:bg-black/[0.03]"
+                  >
+                    加载更多
+                  </button>
+                )}
+              </div>
+            </>
           )}
 
           <div className="rounded-[12px] border border-black/[0.06] bg-apple-bg/40 p-3">

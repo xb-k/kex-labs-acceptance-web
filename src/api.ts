@@ -25,28 +25,61 @@ export async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> 
 }
 
 type State<T> =
-  | { status: 'loading'; data: null; error: null }
-  | { status: 'ready'; data: T; error: null }
-  | { status: 'error'; data: null; error: string }
+  | { status: 'loading'; data: null; error: null; refreshing: boolean; updatedAt: number | null }
+  | { status: 'ready'; data: T; error: null; refreshing: boolean; updatedAt: number | null }
+  | { status: 'error'; data: null; error: string; refreshing: boolean; updatedAt: number | null }
 
-export function useJson<T>(url: string) {
-  const [state, setState] = useState<State<T>>({ status: 'loading', data: null, error: null })
+export function useJson<T>(url: string | null) {
+  const [state, setState] = useState<State<T>>({
+    status: 'loading',
+    data: null,
+    error: null,
+    refreshing: false,
+    updatedAt: null
+  })
   const [nonce, setNonce] = useState(0)
+  const silentRef = useRef(false)
+  const prevUrlRef = useRef<string | null>(url)
+
   const retry = useCallback(() => {
-    setState({ status: 'loading', data: null, error: null })
+    silentRef.current = false
+    setState({ status: 'loading', data: null, error: null, refreshing: false, updatedAt: null })
     setNonce((n) => n + 1)
   }, [])
 
-  /** 静默刷新：保留旧数据，卡片不闪回骨架。 */
-  const refresh = useCallback(() => setNonce((n) => n + 1), [])
+  /** 静默刷新：保留旧数据，卡片不闪回骨架，同时提供 refreshing 状态给按钮旋转反馈。 */
+  const refresh = useCallback(() => {
+    silentRef.current = true
+    setState((prev) => ({ ...prev, refreshing: true }))
+    setNonce((n) => n + 1)
+  }, [])
 
   useEffect(() => {
+    if (prevUrlRef.current !== url) {
+      prevUrlRef.current = url
+      silentRef.current = false
+      setState({ status: 'loading', data: null, error: null, refreshing: false, updatedAt: null })
+    }
+    if (!url) return
+
     const ac = new AbortController()
+    const isSilent = silentRef.current
+    silentRef.current = false
+
     getJson<T>(url, ac.signal)
-      .then((data) => setState({ status: 'ready', data, error: null }))
+      .then((data) => {
+        if (ac.signal.aborted) return
+        setState({ status: 'ready', data, error: null, refreshing: false, updatedAt: Date.now() })
+      })
       .catch((err: unknown) => {
         if (ac.signal.aborted) return
-        setState({ status: 'error', data: null, error: err instanceof Error ? err.message : '请求失败' })
+        const message = err instanceof Error ? err.message : '请求失败'
+        setState((prev) => {
+          if (isSilent && prev.status === 'ready') {
+            return { ...prev, refreshing: false }
+          }
+          return { status: 'error', data: null, error: message, refreshing: false, updatedAt: null }
+        })
       })
     return () => ac.abort()
   }, [url, nonce])
@@ -69,7 +102,7 @@ type LiveState<T> = {
  * 带轮询的读取：刷新时保留旧数据（不闪骨架），只在 `document.visibilityState === 'visible'`
  * 时轮询；隐藏即暂停，重新可见先补一次再恢复。卸载时 abort。
  */
-export function useLiveJson<T>(url: string, pollMs = 5000) {
+export function useLiveJson<T>(url: string | null, pollMs = 5000) {
   const [state, setState] = useState<LiveState<T>>({
     status: 'loading',
     data: null,
@@ -80,6 +113,11 @@ export function useLiveJson<T>(url: string, pollMs = 5000) {
   const inFlight = useRef<AbortController | null>(null)
 
   const load = useCallback(async () => {
+    if (!url) {
+      inFlight.current?.abort()
+      setState({ status: 'loading', data: null, error: null, refreshing: false, updatedAt: null })
+      return
+    }
     inFlight.current?.abort()
     const ac = new AbortController()
     inFlight.current = ac
@@ -105,7 +143,7 @@ export function useLiveJson<T>(url: string, pollMs = 5000) {
   }, [load])
 
   useEffect(() => {
-    if (pollMs <= 0) return
+    if (!url || pollMs <= 0) return
     let timer: number | null = null
     const start = () => {
       if (timer === null) timer = window.setInterval(() => load(), pollMs)
@@ -130,15 +168,15 @@ export function useLiveJson<T>(url: string, pollMs = 5000) {
       stop()
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [load, pollMs])
+  }, [url, load, pollMs])
 
   return { ...state, refresh: load, retry: load }
 }
 
 type SystemState =
-  | { status: 'loading'; data: null; error: null }
-  | { status: 'ready'; data: SystemSnapshot; error: null }
-  | { status: 'error'; data: null; error: string }
+  | { status: 'loading'; data: null; error: null; refreshing: boolean }
+  | { status: 'ready'; data: SystemSnapshot; error: null; refreshing: boolean }
+  | { status: 'error'; data: null; error: string; refreshing: boolean }
 
 function numOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
@@ -185,57 +223,95 @@ export function normalizeSystem(raw: SystemResponse | null | undefined, fallback
 /**
  * 算力/队列状态：优先 `/api/system`；接口未就绪时回退 `/api/health`
  * （回退时 vram/ram/queue 明确为 null，界面显示「无数据」，不编造数字）。
+ * 带 AbortController、页面可见性感知与手动 refresh()。
  */
 export function useSystem(pollMs = 30000) {
-  const [state, setState] = useState<SystemState>({ status: 'loading', data: null, error: null })
+  const [state, setState] = useState<SystemState>({ status: 'loading', data: null, error: null, refreshing: false })
+  const inFlight = useRef<AbortController | null>(null)
 
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
+  const load = useCallback(async () => {
+    inFlight.current?.abort()
+    const ac = new AbortController()
+    inFlight.current = ac
+    setState((prev) => ({ ...prev, refreshing: true }))
+    try {
+      const data = await getJson<SystemResponse>('/api/system', ac.signal)
+      if (!ac.signal.aborted) {
+        setState({ status: 'ready', data: normalizeSystem(data), error: null, refreshing: false })
+      }
+    } catch {
+      if (ac.signal.aborted) return
       try {
-        const data = await getJson<SystemResponse>('/api/system')
-        if (alive) setState({ status: 'ready', data: normalizeSystem(data), error: null })
-      } catch {
-        try {
-          const health = await getJson<HealthResponse>('/api/health')
-          if (!alive) return
-          setState({
-            status: 'ready',
-            error: null,
-            data: normalizeSystem(
-              {
-                online: health.comfyui.ok,
-                latencyMs: health.comfyui.latencyMs,
-                error: health.comfyui.error,
-                configuredUrl: health.comfyui.configuredUrl,
-                checkedAt: health.checkedAt,
-                vram: null,
-                ram: null,
-                queue: null
-              },
-              true
-            )
-          })
-        } catch (err) {
-          if (alive) {
-            setState({
-              status: 'error',
-              data: null,
-              error: err instanceof Error ? err.message : '请求失败'
-            })
-          }
-        }
+        const health = await getJson<HealthResponse>('/api/health', ac.signal)
+        if (ac.signal.aborted) return
+        setState({
+          status: 'ready',
+          error: null,
+          refreshing: false,
+          data: normalizeSystem(
+            {
+              online: health.comfyui.ok,
+              latencyMs: health.comfyui.latencyMs,
+              error: health.comfyui.error,
+              configuredUrl: health.comfyui.configuredUrl,
+              checkedAt: health.checkedAt,
+              vram: null,
+              ram: null,
+              queue: null
+            },
+            true
+          )
+        })
+      } catch (err) {
+        if (ac.signal.aborted) return
+        setState((prev) =>
+          prev.status === 'ready'
+            ? { ...prev, refreshing: false }
+            : {
+                status: 'error',
+                data: null,
+                error: err instanceof Error ? err.message : '请求失败',
+                refreshing: false
+              }
+        )
       }
     }
-    load()
-    const timer = pollMs > 0 ? window.setInterval(load, pollMs) : null
-    return () => {
-      alive = false
-      if (timer) window.clearInterval(timer)
-    }
-  }, [pollMs])
+  }, [])
 
-  return state
+  useEffect(() => {
+    load()
+    return () => inFlight.current?.abort()
+  }, [load])
+
+  useEffect(() => {
+    if (pollMs <= 0) return
+    let timer: number | null = null
+    const start = () => {
+      if (timer === null) timer = window.setInterval(() => load(), pollMs)
+    }
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer)
+        timer = null
+      }
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        load()
+        start()
+      } else {
+        stop()
+      }
+    }
+    if (document.visibilityState === 'visible') start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [load, pollMs])
+
+  return { ...state, refresh: load }
 }
 
 export class HttpError extends Error {

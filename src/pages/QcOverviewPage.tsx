@@ -1,11 +1,30 @@
-import { useMemo, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis
+} from 'recharts'
 import type { GateStatus, QcSummaryJob, QcSummaryResponse } from '../types'
-import { useJson } from '../api'
+import { useLiveJson } from '../api'
+import { downloadCsvFile, formatClockMs } from '../format'
 import { Link } from '../router'
 import { StatusChip } from '../components/StatusChip'
 import { DataTable, type Column } from '../components/DataTable'
 import { QcRuleList } from '../components/QcRuleList'
-import { Chart, ChevronRight, Refresh, Shield, Sliders } from '../components/icons'
+import { SelectMenu } from '../components/SelectMenu'
+import { FilterChipGroup, ToolButton } from '../components/ui'
+import { Chart, ChevronRight, Pause, Play, Refresh, Shield, Sliders } from '../components/icons'
+import { useInfiniteScrollBatch } from '../hooks'
+import { explainJobSummaryRow } from '../qc-explain'
+
+const QC_POLL_MS = 4000
+const PAGE_LIMIT = 15
 
 const STATUS_LABEL: Record<GateStatus, string> = {
   PASS: '通过',
@@ -21,6 +40,16 @@ const TONE = {
   orange: { tile: 'bg-[#FFF3E4] text-[#B25E00] ring-[#F8E2C8]', accent: '#C77700' }
 } as const
 
+type GateFilter = 'all' | 'PASS' | 'FAIL' | 'PENDING'
+type QcSortKey = 'default' | 'fail_first' | 'ssim_asc' | 'noise_desc'
+
+const SORT_OPTIONS: Array<{ value: QcSortKey; label: string }> = [
+  { value: 'default', label: '默认顺序' },
+  { value: 'fail_first', label: '未通过 / 待判优先' },
+  { value: 'ssim_asc', label: 'SSIM 从低到高' },
+  { value: 'noise_desc', label: '噪声变化从高到低' }
+]
+
 function numText(value: number | null | undefined, digits: number): string | null {
   if (value == null || !Number.isFinite(value)) return null
   return value.toFixed(digits)
@@ -32,41 +61,23 @@ function median(values: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
 }
 
-function csvCell(value: string | number | null): string {
-  if (value == null) return '无数据'
-  const text = String(value)
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
-}
-
-function downloadCsv(rows: QcSummaryJob[]) {
-  const header = ['jobId', 'taskId', '状态', 'passed', 'judged', 'SSIM', '噪声变化%', '净增益', '鬼影比', 'hasQc']
-  const lines = [
-    header.join(','),
-    ...rows.map((row) =>
-      [
-        csvCell(row.jobId),
-        csvCell(row.taskId),
-        csvCell(row.status),
-        csvCell(row.passed),
-        csvCell(row.judged),
-        csvCell(row.ssim),
-        csvCell(row.noiseChangePct),
-        csvCell(row.netGain),
-        csvCell(row.ghostRatio),
-        csvCell(row.hasQc ? 'true' : 'false')
-      ].join(',')
-    )
-  ]
-  const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
+function exportSummaryCsv(rows: QcSummaryJob[]) {
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-  anchor.href = url
-  anchor.download = `qc-summary-${stamp}.csv`
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  downloadCsvFile(`qc-summary-${stamp}.csv`, [
+    ['jobId', 'taskId', '状态', 'passed', 'judged', 'SSIM', '噪声变化%', '净增益', '鬼影比', 'hasQc'],
+    ...rows.map((row) => [
+      row.jobId,
+      row.taskId,
+      row.status,
+      row.passed,
+      row.judged,
+      row.ssim ?? '无数据',
+      row.noiseChangePct ?? '无数据',
+      row.netGain ?? '无数据',
+      row.ghostRatio ?? '无数据',
+      row.hasQc ? 'true' : 'false'
+    ])
+  ])
 }
 
 function StatCard({
@@ -100,19 +111,6 @@ function StatCard({
   )
 }
 
-function ToolButton({ onClick, children }: { onClick: () => void; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      data-print-hide
-      className="press flex h-8 items-center gap-1.5 rounded-lg border border-black/[0.07] bg-white/85 px-2.5 text-xs font-medium shadow-soft transition-colors hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-    >
-      {children}
-    </button>
-  )
-}
-
 function NoiseTrend({
   jobs,
   limit
@@ -123,8 +121,12 @@ function NoiseTrend({
   const points = useMemo(
     () =>
       jobs
-        .map((job) => ({ jobId: job.jobId, value: job.noiseChangePct }))
-        .filter((point): point is { jobId: string; value: number } => point.value != null && Number.isFinite(point.value)),
+        .map((job) => ({
+          jobId: job.jobId,
+          shortId: job.jobId.length > 14 ? `${job.jobId.slice(0, 6)}…${job.jobId.slice(-5)}` : job.jobId,
+          value: job.noiseChangePct
+        }))
+        .filter((point): point is { jobId: string; shortId: string; value: number } => point.value != null && Number.isFinite(point.value)),
     [jobs]
   )
 
@@ -139,117 +141,91 @@ function NoiseTrend({
     )
   }
 
-  const W = 360
-  const H = 150
-  const P = 30
   const values = points.map((point) => point.value)
-  const lo = Math.min(0, ...values, limit?.value ?? Infinity)
-  const hi = Math.max(1, ...values, limit?.value ?? -Infinity)
-  const x = (index: number) => P + (index / (points.length - 1)) * (W - P * 2)
-  const y = (value: number) => P + (1 - (value - lo) / (hi - lo || 1)) * (H - P * 2)
-
-  // Catmull-Rom → 三次贝塞尔：Apple Health 风格平滑曲线，只连真实点。
-  const curve = (() => {
-    const px = points.map((_, index) => x(index))
-    const py = points.map((point) => y(point.value))
-    let d = `M${px[0].toFixed(2)},${py[0].toFixed(2)}`
-    for (let i = 0; i < points.length - 1; i += 1) {
-      const x0 = px[i - 1] ?? px[i]
-      const y0 = py[i - 1] ?? py[i]
-      const x1 = px[i]
-      const y1 = py[i]
-      const x2 = px[i + 1]
-      const y2 = py[i + 1]
-      const x3 = px[i + 2] ?? x2
-      const y3 = py[i + 2] ?? py[i + 1]
-      d += ` C${(x1 + (x2 - x0) / 6).toFixed(2)},${(y1 + (y2 - y0) / 6).toFixed(2)} ${(x2 - (x3 - x1) / 6).toFixed(2)},${(
-        y2 - (y3 - y1) / 6
-      ).toFixed(2)} ${x2.toFixed(2)},${y2.toFixed(2)}`
-    }
-    return d
-  })()
-  const area = `${curve} L${x(points.length - 1).toFixed(2)},${H - P} L${x(0).toFixed(2)},${H - P} Z`
-  const mid = (lo + hi) / 2
+  const lo = Math.floor(Math.min(0, ...values, limit?.value ?? Infinity) - 1)
+  const hi = Math.ceil(Math.max(2, ...values, limit?.value ?? -Infinity) + 1)
 
   return (
     <div data-testid="qc-trend" data-points={points.length}>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        role="img"
-        aria-label={`噪声变化趋势：${points.map((point) => `${point.jobId} ${point.value}%`).join('，')}`}
-        className="w-full max-w-[420px]"
-      >
-        <line x1={P} y1={H - P} x2={W - P} y2={H - P} stroke="#E5E5EA" strokeWidth="1" />
-        <line x1={P} y1={P} x2={P} y2={H - P} stroke="#E5E5EA" strokeWidth="1" />
-        {[lo, mid, hi].map((tick) => (
-          <line
-            key={tick}
-            x1={P}
-            y1={y(tick)}
-            x2={W - P}
-            y2={y(tick)}
-            stroke="#F0F0F3"
-            strokeWidth="1"
-            strokeDasharray={tick === 0 ? undefined : '2 4'}
-          />
-        ))}
-        <text x={P - 4} y={P + 3} textAnchor="end" fontSize="9" fill="#6E6E73">
-          {hi.toFixed(1)}%
-        </text>
-        <text x={P - 4} y={H - P + 3} textAnchor="end" fontSize="9" fill="#6E6E73">
-          {lo.toFixed(1)}%
-        </text>
-        <defs>
-          <linearGradient id="qc-noise-fill" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="#30A14E" stopOpacity="0.16" />
-            <stop offset="100%" stopColor="#30A14E" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <path d={area} fill="url(#qc-noise-fill)" />
-        <path
-          d={curve}
-          fill="none"
-          stroke="#30A14E"
-          strokeWidth="2"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          className="chart-line"
-        />
-        {limit && (
-          <g>
-            <line
-              x1={P}
-              y1={y(limit.value)}
-              x2={W - P}
-              y2={y(limit.value)}
-              stroke="#C77700"
-              strokeWidth="1"
-              strokeDasharray="4 3"
+      <div className="h-[190px] w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={points} margin={{ top: 12, right: 12, left: -12, bottom: 4 }}>
+            <defs>
+              <linearGradient id="qc-noise-area" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#30A14E" stopOpacity={0.2} />
+                <stop offset="100%" stopColor="#30A14E" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" vertical={false} />
+            <XAxis
+              dataKey="shortId"
+              tick={{ fontSize: 10, fill: '#6E6E73' }}
+              axisLine={{ stroke: '#E5E5EA' }}
+              tickLine={false}
             />
-            <text x={W - P} y={y(limit.value) - 4} textAnchor="end" fontSize="9" fill="#B25000">
-              阈值 {limit.label}
-            </text>
-          </g>
-        )}
-        {points.map((point, index) => (
-          <g key={point.jobId}>
-            <circle cx={x(index)} cy={y(point.value)} r="3.5" fill="#30A14E" stroke="#fff" strokeWidth="1.5" />
-            <text x={x(index)} y={H - 12} textAnchor="middle" fontSize="9" fill="#6E6E73">
-              {point.jobId}
-            </text>
-            <text x={x(index)} y={y(point.value) - 8} textAnchor="middle" fontSize="9" fill="#1D1D1F" className="num">
-              {point.value.toFixed(1)}%
-            </text>
-          </g>
-        ))}
-      </svg>
-      <p className="mt-1 text-[11px] leading-relaxed text-apple-subtext">折线按 /api/qc/summary 返回顺序绘制，仅含真实值。</p>
+            <YAxis
+              domain={[lo, hi]}
+              tick={{ fontSize: 10, fill: '#6E6E73' }}
+              tickFormatter={(val: number) => `${val}%`}
+              axisLine={false}
+              tickLine={false}
+            />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: '#FFFFFF',
+                border: '1px solid rgba(0,0,0,0.08)',
+                borderRadius: '10px',
+                fontSize: '12px',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.08)'
+              }}
+              labelFormatter={(_, payload) => {
+                const first = payload?.[0]?.payload as { jobId?: string } | undefined
+                return first?.jobId ? `任务 ${first.jobId}` : ''
+              }}
+              formatter={(value) => [`${Number(value).toFixed(2)}%`, '噪声变化']}
+            />
+            {limit && (
+              <ReferenceLine
+                y={limit.value}
+                stroke="#C77700"
+                strokeDasharray="4 3"
+                label={{
+                  value: `门禁阈值 ${limit.label}`,
+                  position: 'insideTopRight',
+                  fill: '#B25E00',
+                  fontSize: 10
+                }}
+              />
+            )}
+            <Area type="monotone" dataKey="value" fill="url(#qc-noise-area)" stroke="none" isAnimationActive={false} />
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke="#30A14E"
+              strokeWidth={2}
+              dot={{ r: 3.5, fill: '#30A14E', stroke: '#FFFFFF', strokeWidth: 1.5 }}
+              activeDot={{ r: 5, fill: '#30A14E', stroke: '#FFFFFF', strokeWidth: 2 }}
+              isAnimationActive={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <p className="mt-1 text-[11px] leading-relaxed text-apple-subtext">
+        折线按 /api/qc/summary 返回顺序绘制，仅含真实检测样本（共 {points.length} 组）。
+      </p>
     </div>
   )
 }
 
 export function QcOverviewPage() {
-  const { status, data, error, retry } = useJson<QcSummaryResponse>('/api/qc/summary')
+  const [liveSync, setLiveSync] = useState(true)
+  const { status, data, error, refreshing, updatedAt, retry, refresh } = useLiveJson<QcSummaryResponse>(
+    '/api/qc/summary',
+    liveSync ? QC_POLL_MS : 0
+  )
+  const [gateFilter, setGateFilter] = useState<GateFilter>('all')
+  const [sortBy, setSortBy] = useState<QcSortKey>('default')
+  const [query, setQuery] = useState('')
   const jobs = data?.jobs ?? []
 
   const kpi = useMemo(() => {
@@ -278,6 +254,40 @@ export function QcOverviewPage() {
     }
   }, [jobs])
 
+  const filteredJobs = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const matched = jobs.filter((job) => {
+      if (gateFilter === 'PASS' && job.status !== 'PASS') return false
+      if (gateFilter === 'FAIL' && job.status !== 'FAIL') return false
+      if (gateFilter === 'PENDING' && (job.status === 'PASS' || job.status === 'FAIL')) return false
+      if (!q) return true
+      return job.jobId.toLowerCase().includes(q) || job.taskId.toLowerCase().includes(q)
+    })
+    if (sortBy === 'default') return matched
+    const sorted = [...matched]
+    if (sortBy === 'fail_first') {
+      const rank = (s: GateStatus) => (s === 'FAIL' ? 0 : s === 'CONDITIONAL' || s === 'UNKNOWN' ? 1 : 2)
+      sorted.sort((a, b) => rank(a.status) - rank(b.status))
+    } else if (sortBy === 'ssim_asc') {
+      sorted.sort((a, b) => (a.ssim ?? Infinity) - (b.ssim ?? Infinity))
+    } else if (sortBy === 'noise_desc') {
+      sorted.sort((a, b) => (b.noiseChangePct ?? -Infinity) - (a.noiseChangePct ?? -Infinity))
+    }
+    return sorted
+  }, [jobs, gateFilter, query, sortBy])
+
+  const lazyBatch = useInfiniteScrollBatch(
+    filteredJobs.length,
+    PAGE_LIMIT,
+    PAGE_LIMIT,
+    `${gateFilter}|${sortBy}|${query}`
+  )
+
+  const visibleJobs = useMemo(
+    () => filteredJobs.slice(0, lazyBatch.visibleCount),
+    [filteredJobs, lazyBatch.visibleCount]
+  )
+
   const noiseLimit = useMemo(() => {
     const item = data?.thresholds.items.find((entry) => entry.key === 'B2_noise_change_pct')
     if (!item) return null
@@ -298,7 +308,7 @@ export function QcOverviewPage() {
   const columns: Column<QcSummaryJob>[] = [
     {
       key: 'jobId',
-      label: 'jobId',
+      label: '任务 ID',
       cell: (row) => (
         <Link
           to={`/job/${row.jobId}/qc`}
@@ -309,10 +319,10 @@ export function QcOverviewPage() {
         </Link>
       )
     },
-    { key: 'taskId', label: 'taskId', className: 'num whitespace-nowrap', cell: (row) => row.taskId },
+    { key: 'taskId', label: '关联任务', className: 'num whitespace-nowrap', cell: (row) => row.taskId },
     {
       key: 'status',
-      label: '状态',
+      label: '门禁结论',
       cell: (row) => (
         <span data-status={row.status} title={row.status}>
           <StatusChip status={row.status} label={STATUS_LABEL[row.status]} />
@@ -321,7 +331,7 @@ export function QcOverviewPage() {
     },
     {
       key: 'passed',
-      label: 'passed / judged',
+      label: '通过 / 总判定',
       className: 'num tabular-nums whitespace-nowrap text-right',
       cell: (row) => (
         <span data-passed={row.passed} data-judged={row.judged}>
@@ -330,36 +340,71 @@ export function QcOverviewPage() {
       )
     },
     {
+      key: 'verdictExplain',
+      label: '一眼看懂结论（白话）',
+      cell: (row) => {
+        const diag = explainJobSummaryRow(row)
+        const headlineTone =
+          diag.tone === 'pass'
+            ? 'text-[#1E7A3C]'
+            : diag.tone === 'fail'
+              ? 'text-[#B3261E]'
+              : diag.tone === 'warn'
+                ? 'text-[#9A5B00]'
+                : 'text-apple-subtext'
+        return (
+          <div className="max-w-[230px] leading-snug">
+            <span className={`block text-[12px] font-semibold ${headlineTone}`}>{diag.headline}</span>
+            <span className="mt-0.5 block truncate text-[11px] text-apple-subtext" title={diag.detail}>
+              {diag.detail}
+            </span>
+          </div>
+        )
+      }
+    },
+    {
       key: 'ssim',
-      label: 'SSIM',
+      label: '清晰度还原 (SSIM)',
       className: 'num tabular-nums whitespace-nowrap text-right',
-      cell: (row) => <span data-ssim={row.ssim ?? ''}>{numText(row.ssim, 4) ?? '无数据'}</span>
+      cell: (row) => (
+        <span data-ssim={row.ssim ?? ''} title="1.0 最好，≥0.80 为肉眼高清不糊">
+          {numText(row.ssim, 4) ?? '无数据'}
+        </span>
+      )
     },
     {
       key: 'noise',
-      label: '噪声变化 %',
+      label: '雪花噪点变化',
       className: 'num tabular-nums whitespace-nowrap text-right',
       cell: (row) => (
-        <span data-noise={row.noiseChangePct ?? ''}>
+        <span data-noise={row.noiseChangePct ?? ''} title="负值表示噪点减少画面更干净，≤+15% 为合格">
           {row.noiseChangePct == null ? '无数据' : `${row.noiseChangePct > 0 ? '+' : ''}${row.noiseChangePct.toFixed(1)}%`}
         </span>
       )
     },
     {
       key: 'netGain',
-      label: '净增益',
+      label: '细节提升 (净增益)',
       className: 'num tabular-nums whitespace-nowrap text-right',
-      cell: (row) => <span data-net-gain={row.netGain ?? ''}>{numText(row.netGain, 2) ?? '无数据'}</span>
+      cell: (row) => (
+        <span data-net-gain={row.netGain ?? ''} title="≥1.5× 说明画面边缘更清晰立体">
+          {numText(row.netGain, 2) ?? '无数据'}
+        </span>
+      )
     },
     {
       key: 'ghost',
-      label: '鬼影比',
+      label: '运动重影 (鬼影比)',
       className: 'num tabular-nums whitespace-nowrap text-right',
-      cell: (row) => <span data-ghost={row.ghostRatio ?? ''}>{numText(row.ghostRatio, 3) ?? '无数据'}</span>
+      cell: (row) => (
+        <span data-ghost={row.ghostRatio ?? ''} title="越低越好，≤1.5 表示快速动作不拖影">
+          {numText(row.ghostRatio, 3) ?? '无数据'}
+        </span>
+      )
     },
     {
       key: 'hasQc',
-      label: 'hasQc',
+      label: '完整报告',
       className: 'num tabular-nums whitespace-nowrap text-right',
       cell: (row) => <span data-has-qc={row.hasQc ? 'true' : 'false'}>{row.hasQc ? '有' : '无'}</span>
     }
@@ -379,7 +424,7 @@ export function QcOverviewPage() {
     )
   }
 
-  if (status === 'error') {
+  if (status === 'error' && !data) {
     return (
       <div>
         <h1 className="text-[28px] font-semibold leading-tight tracking-[-0.02em] sm:text-[32px]">QC 质量门禁</h1>
@@ -407,69 +452,85 @@ export function QcOverviewPage() {
         <div>
           <h1 className="text-[28px] font-semibold leading-tight tracking-[-0.02em] sm:text-[32px]">QC 质量门禁</h1>
           <p className="mt-1.5 max-w-[76ch] text-sm leading-relaxed text-apple-subtext">
-            汇总所有任务的真实 QC 指标、门禁判定与噪声变化；缺失一律显示无数据，不以 0 冒充。
+            汇总全平台视频渲染任务的真实 QC 指标、门禁判定、失败异常分布与噪声变化趋势；缺失项如实显示「无数据」。
           </p>
         </div>
-        <p className="num text-[11px] leading-relaxed text-apple-subtext">
-          数据 /api/qc/summary · 来源 {data?.meta.source ?? '无数据'}
-        </p>
+        <div className="flex flex-wrap items-center gap-2.5" data-print-hide>
+          <span className="num text-[11px] leading-relaxed text-apple-subtext">
+            来源 {data?.meta.source ?? '无数据'}
+            {updatedAt != null && ` · 同步于 ${formatClockMs(updatedAt)}`}
+          </span>
+          <ToolButton onClick={() => setLiveSync((v) => !v)} aria-pressed={liveSync}>
+            {liveSync ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+            {liveSync ? '实时巡检 4s' : '已暂停'}
+          </ToolButton>
+          <ToolButton onClick={refresh} disabled={refreshing}>
+            <Refresh className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            {refreshing ? '刷新中' : '刷新'}
+          </ToolButton>
+        </div>
       </header>
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-equal-grid data-stagger>
         <StatCard
-          label="受检 job 数"
+          label="已完成质检视频"
           icon={<Shield className="h-4 w-4" />}
           tone="blue"
-          note={`共 ${jobs.length} 个任务 · hasQc=true 才计入`}
+          note={`全平台共 ${jobs.length} 个视频任务，已完成自动体检并出报告`}
         >
           <p className="flex items-baseline gap-1.5" data-kpi="inspected">
             <span className="num text-kpi" data-value={kpi.inspected}>
               {kpi.inspected}
             </span>
-            <span className="text-xs text-apple-subtext">个</span>
+            <span className="text-xs text-apple-subtext">支</span>
           </p>
         </StatCard>
 
         <StatCard
-          label="PASS / FAIL / 待判"
+          label="可发布 / 需重修 / 待复查"
           icon={<Shield className="h-4 w-4" />}
           tone="green"
-          note="按 status 真实分组 · 待判 = 非 PASS 且非 FAIL"
+          note="PASS 可直接交付 · FAIL 建议调参重跑 · 点击下方可筛选"
         >
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1" data-kpi="gate">
             <span className="inline-flex items-baseline gap-1" data-gate="PASS" data-value={kpi.pass}>
               <span className="num text-[22px] font-semibold leading-none">{kpi.pass}</span>
-              <span className="text-[11px] text-apple-subtext">PASS</span>
+              <span className="text-[11px] text-apple-subtext">可直接发</span>
             </span>
             <span className="inline-flex items-baseline gap-1" data-gate="FAIL" data-value={kpi.fail}>
               <span className="num text-[22px] font-semibold leading-none">{kpi.fail}</span>
-              <span className="text-[11px] text-apple-subtext">FAIL</span>
+              <span className="text-[11px] text-apple-subtext">需重修</span>
             </span>
             <span className="inline-flex items-baseline gap-1" data-gate="PENDING" data-value={kpi.pending}>
               <span className="num text-[22px] font-semibold leading-none">{kpi.pending}</span>
-              <span className="text-[11px] text-apple-subtext">待判</span>
+              <span className="text-[11px] text-apple-subtext">待复查</span>
             </span>
           </div>
         </StatCard>
 
         <StatCard
-          label="平均 SSIM"
+          label="画面清晰度均分 (SSIM)"
           icon={<Chart className="h-4 w-4" />}
           tone="purple"
-          note={`仅统计有值项 · n=${kpi.ssimCount}`}
+          note={`满分 1.0，≥0.80 即肉眼高清不糊 · 实测 ${kpi.ssimCount} 支`}
         >
           <p className="flex items-baseline gap-1.5" data-kpi="ssim">
             <span className="num text-kpi" data-value={kpi.meanSsim?.toFixed(4) ?? ''}>
               {kpi.meanSsim == null ? '无数据' : kpi.meanSsim.toFixed(4)}
             </span>
+            {kpi.meanSsim != null && (
+              <span className={`text-[11px] font-medium ${kpi.meanSsim >= 0.8 ? 'text-[#1E7A3C]' : 'text-[#B3261E]'}`}>
+                {kpi.meanSsim >= 0.8 ? '清晰达标' : '偏糊需检查'}
+              </span>
+            )}
           </p>
         </StatCard>
 
         <StatCard
-          label="噪声变化"
+          label="画面雪花噪点变化"
           icon={<Sliders className="h-4 w-4" />}
           tone="orange"
-          note={`有效值 n=${kpi.noiseValues.length} · 低于 2 个不绘图`}
+          note={`负数表示噪点变少画面更干净 · 实测 ${kpi.noiseValues.length} 支（不足2支不绘图）`}
         >
           <div data-kpi="noise" data-value={kpi.noiseInsufficient ? 'insufficient' : kpi.noiseMedian?.toFixed(1) ?? ''}>
             {kpi.noiseInsufficient ? (
@@ -477,7 +538,9 @@ export function QcOverviewPage() {
             ) : (
               <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <span className="num text-kpi">{kpi.noiseMedian?.toFixed(1)}%</span>
-                <span className="num text-xs text-apple-subtext">中位数 · 最大 {kpi.noiseMax?.toFixed(1)}%</span>
+                <span className="num text-xs text-apple-subtext">
+                  {(kpi.noiseMedian ?? 0) <= 0 ? '噪点减少 · 更干净' : `中位数 · 最差 ${kpi.noiseMax?.toFixed(1)}%`}
+                </span>
               </p>
             )}
           </div>
@@ -488,44 +551,109 @@ export function QcOverviewPage() {
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
             <h2 id="qc-rules-title" className="text-[15px] font-semibold tracking-tight">
-              门禁规则清单
+              质量体检标准（通俗解读）
             </h2>
             <p className="mt-0.5 text-[11px] leading-relaxed text-apple-subtext">
-              名称 / 阈值（op / unit）/ 实际值 / 判定；actual 为 null 显示「无数据」，不造数。
+              把专业画面参数翻译为日常可理解的含义与处理建议；未实测指标如实显示「无数据」。
             </p>
           </div>
           <span className="num text-[11px] text-apple-subtext" data-testid="qc-rules-count">
-            {data?.rules.length ?? 0} 条
+            {data?.rules.length ?? 0} 条标准
           </span>
         </div>
-        <QcRuleList rules={data?.rules ?? []} source={data?.rulesSource} />
+        <QcRuleList rules={data?.rules ?? []} source={data?.rulesSource} explain />
       </section>
 
       <section className="card mt-5 p-4 sm:p-5" aria-labelledby="qc-jobs-title">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 id="qc-jobs-title" className="text-[15px] font-semibold tracking-tight">
-              逐 job 指标
+              逐 job 指标与质量诊断
             </h2>
             <p className="mt-0.5 text-[11px] leading-relaxed text-apple-subtext">
-              jobId 链到 /job/:id/qc 明细；null 显示无数据。
+              点击任务 ID 进入单片深度 QC 明细页（帧级对比、波形与音频门禁结果）。
             </p>
           </div>
           <div className="flex items-center gap-2" data-print-hide>
-            <ToolButton onClick={() => downloadCsv(jobs)}>导出 CSV</ToolButton>
+            <ToolButton onClick={() => exportSummaryCsv(filteredJobs)}>导出 CSV</ToolButton>
             <ToolButton onClick={() => window.print()}>打印</ToolButton>
           </div>
         </div>
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2.5" data-print-hide>
+          <FilterChipGroup
+            label="按 QC 状态筛选"
+            value={gateFilter}
+            onChange={(next) => {
+              setGateFilter(next)
+            }}
+            options={[
+              { key: 'all', label: '全部', count: jobs.length },
+              { key: 'PASS', label: '可直接发 (PASS)', count: kpi.pass },
+              { key: 'FAIL', label: '需重修 (FAIL)', count: kpi.fail },
+              { key: 'PENDING', label: '待复查', count: kpi.pending }
+            ]}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <SelectMenu
+              ariaLabel="排序方式"
+              value={sortBy}
+              onChange={(val) => setSortBy(val as QcSortKey)}
+              options={SORT_OPTIONS}
+              size="sm"
+              align="right"
+              className="w-[152px]"
+            />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && query) setQuery('')
+              }}
+              placeholder="搜索 jobId / taskId"
+              aria-label="搜索 jobId 或 taskId"
+              className="h-8 w-full rounded-lg border border-black/[0.09] bg-white px-3 text-xs text-apple-text placeholder:text-apple-subtext focus:border-apple-blue focus:outline-none sm:w-52"
+            />
+          </div>
+        </div>
+
         <div className="mt-3" data-testid="qc-jobs">
           <DataTable
             columns={columns}
-            rows={jobs}
+            rows={visibleJobs}
             rowKey={(row) => row.jobId}
             rowAlign="middle"
-            rowHeightClass="h-[54px]"
+            rowHeightClass="h-[58px]"
             rowClassName={(row) => (row.status === 'PASS' ? '' : 'bg-[rgba(255,59,48,0.04)] hover:bg-[rgba(255,59,48,0.06)]')}
-            empty="无 QC 任务数据（/api/qc/summary 返回 0 个 job）。"
+            empty={
+              jobs.length === 0
+                ? '无 QC 任务数据（/api/qc/summary 返回 0 个 job）。'
+                : '当前筛选条件下无匹配的 QC 任务。'
+            }
           />
+          {filteredJobs.length > 0 && (
+            <div
+              ref={lazyBatch.sentinelRef}
+              className="mt-3 flex items-center justify-between border-t border-black/[0.06] pt-3 text-[11px] text-apple-subtext"
+            >
+              <span className="num">
+                已显示 {visibleJobs.length} / {filteredJobs.length} 条质检记录
+                {lazyBatch.hasMore ? ' · 向下滚动自动加载更多' : ' · 已全部加载'}
+              </span>
+              {lazyBatch.hasMore && (
+                <button
+                  type="button"
+                  onClick={lazyBatch.loadMore}
+                  className="press rounded-lg border border-black/[0.08] bg-white px-3 py-1 text-[11px] font-medium text-apple-text hover:bg-[#FAFAFC]"
+                >
+                  再加载 {Math.min(PAGE_LIMIT, filteredJobs.length - visibleJobs.length)} 条
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </section>
 
@@ -538,31 +666,52 @@ export function QcOverviewPage() {
             <span className="num text-[11px] text-apple-subtext">{failureBuckets.reduce((sum, bucket) => sum + bucket.count, 0)} 项</span>
           </div>
           <p className="mt-0.5 text-[11px] leading-relaxed text-apple-subtext">
-            按 /api/qc/summary 的 status 原始值分组，不重命名、不合并。
+            按门禁状态原始值分布（点击状态行可立即筛选对应任务列表）。
           </p>
           <div className="mt-3 flex-1" data-testid="qc-dist">
             {failureBuckets.length === 0 ? (
-              <p className="text-xs text-apple-subtext">无失败或待判项。</p>
+              <p className="text-xs text-apple-subtext">无失败或待判项，全部受检任务均已 PASS。</p>
             ) : (
               <ul className="space-y-2.5">
-                {failureBuckets.map((bucket) => (
-                  <li key={bucket.value} className="flex items-center justify-between gap-3" data-status={bucket.value} data-count={bucket.count}>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="num rounded bg-apple-bg px-1.5 py-0.5 text-[11px] font-medium text-apple-subtextAlt">
-                          {bucket.value}
-                        </span>
-                        <span className="num text-sm font-semibold">{bucket.count}</span>
-                      </div>
-                      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-black/[0.05]">
-                        <span
-                          className="block h-full rounded-full bg-[#C77700]"
-                          style={{ width: `${(bucket.count / Math.max(1, jobs.length)) * 100}%` }}
-                        />
-                      </div>
-                    </div>
-                  </li>
-                ))}
+                {failureBuckets.map((bucket) => {
+                  const targetFilter: GateFilter = bucket.value === 'FAIL' ? 'FAIL' : 'PENDING'
+                  const isActive = gateFilter === targetFilter
+                  return (
+                    <li
+                      key={bucket.value}
+                      data-status={bucket.value}
+                      data-count={bucket.count}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setGateFilter(isActive ? 'all' : targetFilter)}
+                        className={`w-full rounded-[10px] border p-2.5 text-left transition-colors ${
+                          isActive
+                            ? 'border-[#F3D3CF] bg-[#FFF8F6]'
+                            : 'border-black/[0.06] bg-white hover:bg-[#FAFAFC]'
+                        }`}
+                      >
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="num text-xs font-medium text-apple-text">
+                            {bucket.value}
+                            <span className="ml-1.5 text-[10px] font-normal text-apple-subtext">
+                              ({STATUS_LABEL[bucket.value as GateStatus] ?? bucket.value})
+                            </span>
+                          </span>
+                          <span className="num text-sm font-semibold">{bucket.count}</span>
+                        </div>
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-black/[0.05]">
+                          <span
+                            className={`block h-full rounded-full ${
+                              bucket.value === 'FAIL' ? 'bg-[#D93830]' : 'bg-[#C77700]'
+                            }`}
+                            style={{ width: `${(bucket.count / Math.max(1, jobs.length)) * 100}%` }}
+                          />
+                        </div>
+                      </button>
+                    </li>
+                  )
+                })}
               </ul>
             )}
           </div>
@@ -571,12 +720,12 @@ export function QcOverviewPage() {
         <section className="card flex h-full flex-col p-4 sm:p-5" aria-labelledby="qc-trend-title">
           <div className="flex items-baseline justify-between gap-2">
             <h2 id="qc-trend-title" className="text-[15px] font-semibold tracking-tight">
-              噪声趋势
+              画面雪花噪点变化趋势
             </h2>
-            <span className="num text-[11px] text-apple-subtext">B2 · noiseChangePct</span>
+            <span className="num text-[11px] text-apple-subtext">绿线越靠下越干净 · 橙色虚线为警戒线</span>
           </div>
           <p className="mt-0.5 text-[11px] leading-relaxed text-apple-subtext">
-            仅当真实值 ≥2 个时绘制折线；无阈值线时只画数据点。
+            绿点在橙色警戒线下方且为负数，说明噪点比原片明显减少、画质更纯净；超出橙线说明颗粒变重建议调参。
           </p>
           <div className="mt-3 flex-1">
             <NoiseTrend jobs={jobs} limit={noiseLimit} />

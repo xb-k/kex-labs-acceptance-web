@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type {
   BMetricCheck,
   BMetrics,
@@ -10,19 +10,24 @@ import type {
   JobSnapshot
 } from '../types'
 import { getJson, useJson } from '../api'
-import { formatBytes } from '../format'
+import { formatBytes, formatFullStamp } from '../format'
+import { formatHttpError, useCopyToClipboard } from '../hooks'
 import { jobReadable } from '../job-label'
 import { Link } from '../router'
 import { StatusChip } from '../components/StatusChip'
 import { snapshotReasonText } from '../components/SnapshotStatusStage'
-import { ArrowLeft, Chart } from '../components/icons'
+import { ArrowLeft, Chart, Check, Flow, Refresh } from '../components/icons'
 import { CoverKeyframeCard } from '../components/CoverKeyframeCard'
 import { CriteriaGrid } from '../components/CriteriaGrid'
 import { PipelineCard } from '../components/PipelineCard'
 import { VideoCompare } from '../components/VideoCompare'
+import { ToolButton } from '../components/ui'
 
 export function DetailPage({ id }: { id: string }) {
-  const { status, data, error, retry } = useJson<DetailResponse>(`/api/metrics/${encodeURIComponent(id)}`)
+  const { status, data, error, refreshing, retry, refresh } = useJson<DetailResponse>(
+    `/api/metrics/${encodeURIComponent(id)}`
+  )
+  const { status: copyStatus, copy } = useCopyToClipboard()
 
   if (status === 'loading') {
     return <SkeletonDetail />
@@ -43,9 +48,9 @@ export function DetailPage({ id }: { id: string }) {
             >
               重试
             </button>
-              <Link to="/jobs" className="rounded-lg border border-apple-line px-3 py-1.5 text-xs font-medium">
-                返回任务中心
-              </Link>
+            <Link to="/jobs" className="rounded-lg border border-apple-line px-3 py-1.5 text-xs font-medium">
+              返回任务中心
+            </Link>
           </div>
         </div>
       </div>
@@ -58,13 +63,21 @@ export function DetailPage({ id }: { id: string }) {
   // #102：标题优先可读标签；任务 id 降为下方「任务 ID」次要行，排障仍可复制。
   const heading = jobReadable(job)
 
+  const anchors = [
+    { href: '#video-compare', label: '视频对比' },
+    { href: '#sec-criteria', label: bMetrics ? 'B 轨指标' : '判据' },
+    { href: '#sec-pipeline', label: '链条' },
+    ...(!bMetrics ? [{ href: '#sec-logs', label: '日志' }] : []),
+    { href: '#sec-decisions', label: '决策' }
+  ]
+
   return (
     <div>
       <BackLink />
 
       <header className="mt-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-md bg-[#F0F6FF] px-1.5 py-0.5 text-xs font-medium text-apple-blueInk">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="text-xs font-semibold text-apple-blueInk">
             {job.rail ?? job.track} 轨任务
           </span>
           <StatusChip status={job.verdict ?? 'UNKNOWN'} label={job.statusLabel} />
@@ -77,32 +90,70 @@ export function DetailPage({ id }: { id: string }) {
           >
             {heading}
           </h1>
-          {job.hasQc && (
+          <div className="flex flex-wrap items-center gap-2">
+            <ToolButton onClick={refresh} disabled={refreshing} title="刷新当前任务详情">
+              <Refresh className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              {refreshing ? '刷新中' : '刷新'}
+            </ToolButton>
             <Link
-              to={`/job/${job.id}/qc`}
-              className="inline-flex items-center gap-1.5 rounded-full border border-apple-line bg-white px-3.5 py-1.5 text-xs font-medium text-apple-text transition-colors hover:border-[#C9C9CF] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+              to={`/?job=${encodeURIComponent(job.id)}`}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-black/[0.08] bg-white px-3.5 text-xs font-medium text-apple-text transition-colors hover:bg-apple-bg focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
             >
-              <Chart className="h-3.5 w-3.5 text-apple-subtext" />
-              QC 曲线
+              <Flow className="h-3.5 w-3.5 text-apple-subtext" />
+              节点流转
             </Link>
-          )}
+            {job.hasQc && (
+              <Link
+                to={`/job/${job.id}/qc`}
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-black/[0.08] bg-white px-3.5 text-xs font-medium text-apple-text transition-colors hover:bg-apple-bg focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+              >
+                <Chart className="h-3.5 w-3.5 text-apple-subtext" />
+                QC 曲线
+              </Link>
+            )}
+          </div>
         </div>
 
-        <p className="num mt-1.5 break-all text-xs leading-relaxed text-apple-subtext">
-          任务 ID · {job.id}
-          {job.taskId ? (
-            <>
-              {' '}
-              · Brief <span>{job.taskId}</span>
-            </>
-          ) : null}
-        </p>
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs leading-relaxed text-apple-subtext">
+          <span className="num break-all">
+            任务 ID · {job.id}
+            {job.taskId ? (
+              <>
+                {' '}
+                · Brief <span>{job.taskId}</span>
+              </>
+            ) : null}
+          </span>
+          <button
+            type="button"
+            onClick={() => void copy(job.id)}
+            className="inline-flex items-center gap-1 rounded-md border border-black/[0.08] bg-white px-2 py-0.5 text-[11px] font-medium text-apple-text transition-colors hover:bg-apple-bg focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+          >
+            {copyStatus === 'copied' && <Check className="h-3 w-3 text-apple-green" />}
+            {copyStatus === 'copied' ? '已复制 ID' : copyStatus === 'manual' ? '请手动复制' : '复制 ID'}
+          </button>
+        </div>
 
         <p className="mt-2 max-w-[80ch] text-sm leading-relaxed text-apple-subtext">{job.statusNote}</p>
+
+        <nav aria-label="详情快捷跳转" className="mt-3 flex flex-wrap items-center gap-2 border-b border-black/[0.06] pb-2">
+          {anchors.map((a) => (
+            <a
+              key={a.href}
+              href={a.href}
+              className="rounded-lg px-2.5 py-1 text-xs font-medium text-apple-subtext transition-colors hover:bg-black/[0.04] hover:text-apple-text focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+            >
+              {a.label}
+            </a>
+          ))}
+        </nav>
       </header>
 
       {failed.length > 0 && (
-        <div role="status" className="mt-4 rounded-xl border border-[#F3D3CF] bg-[#FCEDEB] px-4 py-3 text-xs leading-relaxed text-[#8A1F18]">
+        <div
+          role="status"
+          className="mt-4 rounded-xl border border-[#F3D3CF] bg-[#FCEDEB] px-4 py-3 text-xs leading-relaxed text-[#8A1F18]"
+        >
           <span className="font-medium">未过项：</span>
           {failed.map((f) => `${f.name}（${f.value}，阈值 ${f.threshold}）`).join('；')}。报告未改 gate、未放宽阈值，如实标记 FAIL。
         </div>
@@ -110,12 +161,24 @@ export function DetailPage({ id }: { id: string }) {
 
       <div className="mt-5 space-y-5">
         <CoverKeyframeCard job={job} />
-        <VideoCompare job={job} />
-        {bMetrics ? <BMetricsTable metrics={bMetrics} /> : <CriteriaGrid criteria={criteria} />}
-        <PipelineCard detail={data} />
-        {!bMetrics && <LogsSection id={job.id} />}
+        <div id="video-compare" className="scroll-mt-16">
+          <VideoCompare job={job} />
+        </div>
+        <div id="sec-criteria" className="scroll-mt-16">
+          {bMetrics ? <BMetricsTable metrics={bMetrics} /> : <CriteriaGrid criteria={criteria} />}
+        </div>
+        <div id="sec-pipeline" className="scroll-mt-16">
+          <PipelineCard detail={data} />
+        </div>
+        {!bMetrics && (
+          <div id="sec-logs" className="scroll-mt-16">
+            <LogsSection id={job.id} />
+          </div>
+        )}
         {!bMetrics && <HistorySection id={job.id} />}
-        <DecisionsSection id={job.id} />
+        <div id="sec-decisions" className="scroll-mt-16">
+          <DecisionsSection id={job.id} />
+        </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
           <section className="card p-4 sm:p-5">
@@ -162,16 +225,8 @@ export function DetailPage({ id }: { id: string }) {
   )
 }
 
-function fmtLogTime(value: string): string {
-  const ms = Date.parse(value)
-  if (!Number.isFinite(ms)) return value
-  return new Date(ms).toLocaleString('zh-CN', { hour12: false })
-}
-
 function LogsSection({ id }: { id: string }) {
-  const { status, data, error, retry } = useJson<JobLogsResponse>(
-    `/api/jobs/${encodeURIComponent(id)}/logs`
-  )
+  const { status, data, error, retry } = useJson<JobLogsResponse>(`/api/jobs/${encodeURIComponent(id)}/logs`)
 
   return (
     <section className="card p-4 sm:p-5">
@@ -224,6 +279,8 @@ function LogRow({ jobId, item }: { jobId: string; item: JobLogItem }) {
   const [loading, setLoading] = useState(false)
   const [content, setContent] = useState<JobLogContentResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [keyword, setKeyword] = useState('')
+  const { status: copyStatus, copy } = useCopyToClipboard()
 
   const toggle = async () => {
     if (open) {
@@ -240,11 +297,21 @@ function LogRow({ jobId, item }: { jobId: string; item: JobLogItem }) {
       )
       setContent(body)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '读取失败')
+      setError(formatHttpError(err, '读取失败'))
     } finally {
       setLoading(false)
     }
   }
+
+  const filteredText = useMemo(() => {
+    if (!content) return ''
+    const q = keyword.trim().toLowerCase()
+    if (!q) return content.content
+    return content.content
+      .split(/\r?\n/)
+      .filter((line) => line.toLowerCase().includes(q))
+      .join('\n')
+  }, [content, keyword])
 
   return (
     <li className="py-2.5">
@@ -256,7 +323,7 @@ function LogRow({ jobId, item }: { jobId: string; item: JobLogItem }) {
       >
         <span className="num min-w-0 break-all text-xs font-medium text-apple-text">{item.name}</span>
         <span className="num shrink-0 text-[11px] text-apple-subtext">
-          {formatBytes(item.size)} · {fmtLogTime(item.mtime)}
+          {formatBytes(item.size)} · {formatFullStamp(item.mtime)}
         </span>
       </button>
       {open && loading && <p className="mt-2 text-xs text-apple-subtext">正在读取尾部内容…</p>}
@@ -267,8 +334,26 @@ function LogRow({ jobId, item }: { jobId: string; item: JobLogItem }) {
       )}
       {open && content && (
         <div className="mt-2">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <input
+              type="search"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="过滤日志关键字（如 error / warn）"
+              aria-label={`过滤 ${item.name} 日志`}
+              className="h-7 w-full max-w-[260px] rounded-lg border border-black/[0.09] bg-white px-2.5 text-[11px] text-apple-text placeholder:text-apple-subtext focus:border-apple-blue focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => void copy(filteredText || content.content)}
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-black/[0.08] bg-white px-2.5 text-[11px] font-medium text-apple-text transition-colors hover:bg-apple-bg focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+            >
+              {copyStatus === 'copied' && <Check className="h-3 w-3 text-apple-green" />}
+              {copyStatus === 'copied' ? '已复制' : '复制内容'}
+            </button>
+          </div>
           <pre className="num max-h-80 max-w-full overflow-auto rounded-lg bg-[#FAFAFB] p-3 text-[11px] leading-relaxed text-[#4A4A4F]">
-            {content.content}
+            {filteredText || '没有匹配当前关键字的日志行。'}
           </pre>
           <p className="mt-1 text-[11px] text-apple-subtext">
             尾部最多 200 行 / 64KB{content.truncated ? '，已截断' : ''} · {content.path}
@@ -373,7 +458,7 @@ function HistorySection({ id }: { id: string }) {
             {data.items.map((item, index) => (
               <li key={`${item.ts ?? 'na'}-${item.kind}-${index}`} className="flex gap-2 text-xs leading-relaxed">
                 <span className="num shrink-0 text-apple-subtext">
-                  {item.ts ? fmtLogTime(item.ts) : '—'}
+                  {item.ts ? formatFullStamp(item.ts) : '—'}
                 </span>
                 <span className="rounded bg-[#F5F5F7] px-1.5 py-0.5 text-[10px] text-apple-subtext">
                   {item.kind}
@@ -421,15 +506,32 @@ function SkeletonDetail() {
 
 /** #86b2: B1/B2/B3 指标表 —— 值/阈值/结果/来源全部来自上游，不补默认阈值。 */
 function BMetricsTable({ metrics }: { metrics: BMetrics }) {
+  const [onlyFailed, setOnlyFailed] = useState(false)
   const groups: Array<BMetricCheck['group']> = ['B1', 'B2', 'B3', '输出']
+  const failCount = metrics.checks.filter((c) => c.pass === false).length
 
   return (
     <section className="card p-4 sm:p-5" data-testid="b-metrics">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-base font-semibold tracking-tight">B1 / B2 质量指标</h2>
-        <p className="text-xs text-apple-subtext">
-          来源 {metrics.source} · 阈值与 PASS/FAIL 只读上游，缺失显示「未记录」
-        </p>
+        <div>
+          <h2 className="text-base font-semibold tracking-tight">B1 / B2 质量指标</h2>
+          <p className="mt-0.5 text-xs text-apple-subtext">
+            来源 {metrics.source} · 阈值与 PASS/FAIL 只读上游，缺失显示「未记录」
+          </p>
+        </div>
+        <button
+          type="button"
+          aria-pressed={onlyFailed}
+          onClick={() => setOnlyFailed((v) => !v)}
+          className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 ${
+            onlyFailed
+              ? 'border-apple-text bg-apple-text text-white'
+              : 'border-apple-line bg-white text-apple-text hover:bg-[#FAFAFB]'
+          }`}
+        >
+          仅看未过项
+          <span className={`num ${onlyFailed ? 'text-white/80' : 'text-apple-subtext'}`}>{failCount}</span>
+        </button>
       </div>
 
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-apple-subtext">
@@ -463,7 +565,10 @@ function BMetricsTable({ metrics }: { metrics: BMetrics }) {
             </tr>
           </thead>
           {groups.map((group) => {
-            const rows = metrics.checks.filter((c) => c.group === group)
+            const rows = metrics.checks.filter(
+              (c) => c.group === group && (!onlyFailed || c.pass === false)
+            )
+            if (onlyFailed && rows.length === 0) return null
             return (
               <tbody key={group} className="divide-y divide-apple-line">
                 <tr className="bg-black/[0.015]">
@@ -492,6 +597,15 @@ function BMetricsTable({ metrics }: { metrics: BMetrics }) {
               </tbody>
             )
           })}
+          {onlyFailed && failCount === 0 && (
+            <tbody>
+              <tr>
+                <td colSpan={6} className="py-4 text-center text-apple-subtext">
+                  当前没有未过项。
+                </td>
+              </tr>
+            </tbody>
+          )}
         </table>
       </div>
     </section>

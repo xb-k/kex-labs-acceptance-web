@@ -35,3 +35,25 @@ export function needsIntranet(url: string): boolean {
     return false
   }
 }
+
+export function readSearchParam(key: string): string | null {
+  if (typeof window === 'undefined') return null
+  return new URLSearchParams(window.location.search).get(key)
+}
+
+export function updateSearchParams(
+  patch: Record<string, string | null | undefined>,
+  mode: 'push' | 'replace' = 'replace'
+): void {
+  if (typeof window === 'undefined') return
+  const next = new URLSearchParams(window.location.search)
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null || v === undefined || v === '') next.delete(k)
+    else next.set(k, v)
+  }
+  const qs = next.toString()
+  const target = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`
+  if (target === `${window.location.pathname}${window.location.search}${window.location.hash}`) return
+  if (mode === 'push') window.history.pushState(null, '', target)
+  else window.history.replaceState(null, '', target)
+}

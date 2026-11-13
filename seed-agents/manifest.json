@@ -430,5 +430,118 @@
       "license": "internal",
       "sha256": "ac0746268fd0ebca56233ecadc24598bfc82ce93a320617217fdceadb084f206"
     }
+  },
+  {
+    "type": "skill",
+    "id": "seed-github-director-skills",
+    "file": "skills/seed-github-director-skills.md",
+    "source": {
+      "kind": "import",
+      "repo": "0xhughs/director-skills",
+      "commit": null,
+      "license": "MIT",
+      "url": "https://raw.githubusercontent.com/0xhughs/director-skills/main/README.md"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-github-visual-skills",
+    "file": "skills/seed-github-visual-skills.md",
+    "source": {
+      "kind": "import",
+      "repo": "smixs/visual-skills",
+      "commit": null,
+      "license": "MIT",
+      "url": "https://raw.githubusercontent.com/smixs/visual-skills/main/README.md"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-github-storyboard-studio",
+    "file": "skills/seed-github-storyboard-studio.md",
+    "source": {
+      "kind": "import",
+      "repo": "Mirza-Luqman/prompt-storyboard-studio",
+      "commit": null,
+      "license": "MIT",
+      "url": "https://raw.githubusercontent.com/Mirza-Luqman/prompt-storyboard-studio/main/README.md"
+    }
+  },
+  {
+    "type": "skill",
+    "id": "seed-script-historical-grounding",
+    "file": "skills/seed-script-historical-grounding.md",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-video-scriptwriter",
+    "file": "agents/seed-video-scriptwriter.md",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-storyboard-director",
+    "file": "agents/seed-storyboard-director.md",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-keyframe-artist",
+    "file": "agents/seed-keyframe-artist.md",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-i2v-generator",
+    "file": "agents/seed-i2v-generator.md",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-video-enhancer",
+    "file": "agents/seed-video-enhancer.md",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal"
+    }
+  },
+  {
+    "type": "agent",
+    "id": "seed-qc-audio-supervisor",
+    "file": "agents/seed-qc-audio-supervisor.md",
+    "source": {
+      "kind": "local",
+      "repo": "kex-labs-video",
+      "commit": null,
+      "license": "internal"
+    }
   }
 ]

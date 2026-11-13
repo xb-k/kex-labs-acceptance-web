@@ -68,6 +68,45 @@
       "host": "studio",
       "project": "通用",
       "skills": []
+    },
+    "seed-video-scriptwriter": {
+      "host": "studio",
+      "project": "kex-labs-video",
+      "skills": [
+        "seed-github-director-skills",
+        "seed-github-visual-skills",
+        "seed-github-storyboard-studio",
+        "seed-script-historical-grounding"
+      ]
+    },
+    "seed-storyboard-director": {
+      "host": "studio",
+      "project": "kex-labs-video",
+      "skills": [
+        "seed-github-director-skills",
+        "seed-github-storyboard-studio",
+        "seed-kex-video-pipeline"
+      ]
+    },
+    "seed-keyframe-artist": {
+      "host": "studio",
+      "project": "kex-labs-video",
+      "skills": ["seed-kex-video-pipeline", "seed-github-visual-skills"]
+    },
+    "seed-i2v-generator": {
+      "host": "studio",
+      "project": "kex-labs-video",
+      "skills": ["seed-kex-video-pipeline", "seed-github-storyboard-studio"]
+    },
+    "seed-video-enhancer": {
+      "host": "studio",
+      "project": "kex-labs-video",
+      "skills": ["seed-kex-video-pipeline"]
+    },
+    "seed-qc-audio-supervisor": {
+      "host": "studio",
+      "project": "kex-labs-video",
+      "skills": ["seed-kex-video-pipeline", "seed-web-tester"]
     }
   },
   "skills": {
@@ -75,6 +114,9 @@
     "seed-convergence-orchestration": { "project": "kex-labs-video" },
     "seed-design-taste-frontend": { "project": "通用" },
     "seed-dev-cookbook": { "project": "通用" },
+    "seed-github-director-skills": { "project": "kex-labs-video" },
+    "seed-github-storyboard-studio": { "project": "kex-labs-video" },
+    "seed-github-visual-skills": { "project": "kex-labs-video" },
     "seed-gsap-core": { "project": "通用" },
     "seed-gsap-frameworks": { "project": "通用" },
     "seed-gsap-performance": { "project": "通用" },
@@ -88,6 +130,7 @@
     "seed-receiving-code-review": { "project": "通用" },
     "seed-repo-audit": { "project": "通用" },
     "seed-rpa-flow-fix": { "project": "lofa" },
+    "seed-script-historical-grounding": { "project": "kex-labs-video" },
     "seed-show-tasks": { "project": "通用" },
     "seed-web-tester": { "project": "kex-labs-video" },
     "seed-website-security-assessment": { "project": "通用" }

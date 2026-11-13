@@ -57,7 +57,9 @@ import {
   type StudioContext
 } from './studio'
 import { handleAgentsRoute } from './agents'
+import { handleGeminiRoute } from './gemini'
 import { handleUploadsRoute } from './uploads'
+import { handleVideoOptimizeRoute } from './video-optimize'
 import {
   createRiskDecision,
   listRiskDecisions,
@@ -4306,6 +4308,28 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       readJson,
       atomicWriteJson,
       readBody: readRequestBody
+    })
+    return
+  }
+
+  if (pathname === '/api/optimize' || pathname.startsWith('/api/optimize/')) {
+    await handleVideoOptimizeRoute(req, res, url, pathname, {
+      dataRoot: DATA_ROOT,
+      sendJson,
+      readJson,
+      atomicWriteJson,
+      readBody: readRequestBody
+    })
+    return
+  }
+
+  if (pathname.startsWith('/api/gemini/')) {
+    await handleGeminiRoute(req, res, pathname, {
+      sendJson,
+      readBody: readRequestBody,
+      dataRoot: DATA_ROOT,
+      readJson,
+      atomicWriteJson
     })
     return
   }

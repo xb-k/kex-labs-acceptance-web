@@ -1,31 +1,42 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode, RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { DeliveriesResponse, Delivery, DeliveryRepair, DeliveryTrashResponse } from '../types'
-import { HttpError, deleteJson, useJson } from '../api'
+import { deleteJson, useJson } from '../api'
 import { Link } from '../router'
 import { ChevronDown, Close, More, Play, Refresh, Share, Trash } from '../components/icons'
 import { ShareButton } from '../components/ShareDialog'
-import { formatDuration, formatResolution } from '../format'
+import { SelectMenu } from '../components/SelectMenu'
+import { FilterChipGroup, ToolButton } from '../components/ui'
+import { formatBytes, formatDuration, formatFullStamp, formatResolution } from '../format'
+import { formatHttpError, useInfiniteScrollBatch, useModalA11y, useToast } from '../hooks'
 
-function stamp(value: string | null): string {
-  if (!value) return '无数据'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value.slice(0, 16).replace('T', ' ')
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
+const BYTE_OPTS = { fallback: '大小未知', zeroAsFallback: true, showKb: true } as const
+
+type GateFilter = 'all' | 'PASS' | 'CONDITIONAL' | 'FAIL'
+type SortKey = 'default' | 'newest' | 'duration' | 'score'
 
 function withDownload(url: string): string {
   const separator = url.includes('?') ? '&' : '?'
   return `${url}${separator}download=1`
 }
 
-function gateTone(gate: string): string {
-  if (gate.includes('有条件')) return 'bg-[#FFF4E5] text-apple-amber ring-[#F5DFC0]'
-  if (gate.startsWith('FAIL')) return 'bg-[#FCEDEB] text-[#B3261E] ring-[#F3D3CF]'
-  if (gate.startsWith('PASS')) return 'bg-[#EAF8EE] text-[#1E7A3C] ring-[#CDEED6]'
-  return 'bg-[#F0F0F2] text-apple-subtextAlt ring-[#E2E2E6]'
+function gateTone(gate: string): { dot: string; text: string } {
+  if (gate.includes('有条件')) return { dot: 'bg-[#C77700]', text: 'text-apple-amber' }
+  if (gate.startsWith('FAIL')) return { dot: 'bg-apple-red', text: 'text-[#B3261E]' }
+  if (gate.startsWith('PASS')) return { dot: 'bg-apple-statusDone', text: 'text-[#1E7A3C]' }
+  return { dot: 'bg-apple-subtext', text: 'text-apple-subtextAlt' }
+}
+
+function matchesGateFilter(gate: string, filter: GateFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'CONDITIONAL') return gate.includes('有条件')
+  if (filter === 'PASS') return gate.startsWith('PASS') && !gate.includes('有条件')
+  return gate.startsWith('FAIL')
+}
+
+function scoreSortValue(score: number | null | undefined): number {
+  return score != null && Number.isFinite(score) ? score : -1
 }
 
 function Cover({ sources, title }: { sources: string[]; title: string }) {
@@ -56,11 +67,12 @@ function Cover({ sources, title }: { sources: string[]; title: string }) {
     )
   }
 
-
   return (
     <img
       src={src}
       alt={`${title} 封面`}
+      loading="lazy"
+      decoding="async"
       data-testid="delivery-cover"
       data-source={src}
       className="h-full w-full object-cover"
@@ -92,7 +104,7 @@ function RepairPanel({ repair, jobId }: { repair: DeliveryRepair; jobId: string 
         </dd>
         <dt className="text-apple-subtext">生成时间</dt>
         <dd className="num" data-testid="repair-generated-at">
-          {stamp(latest.generatedAt)}
+          {latest.generatedAt ? formatFullStamp(latest.generatedAt) : '无数据'}
         </dd>
       </dl>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-medium">
@@ -128,60 +140,6 @@ function RepairPanel({ repair, jobId }: { repair: DeliveryRepair; jobId: string 
 }
 
 const MENU_ESTIMATED_HEIGHT = 48
-
-/** 字节 → 人类可读（#107 删除确认框）；未知/0 显示「大小未知」。 */
-function formatBytes(bytes: number | null | undefined): string {
-  if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return '大小未知'
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
-  return `${Math.max(1, Math.round(bytes / 1024))} KB`
-}
-
-/** Esc 关闭 + Tab 焦点锁在 panel 内 + 背景不滚动（与 ShareDialog 同规格）。 */
-function useModalA11y(
-  open: boolean,
-  panelRef: RefObject<HTMLElement>,
-  onClose: () => void,
-  initialFocusRef?: RefObject<HTMLElement>
-) {
-  const closeRef = useRef(onClose)
-  closeRef.current = onClose
-  useEffect(() => {
-    if (!open) return
-    initialFocusRef?.current?.focus()
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        event.stopPropagation()
-        closeRef.current()
-        return
-      }
-      if (event.key !== 'Tab' || !panelRef.current) return
-      const nodes = Array.from(
-        panelRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), a[href], video, [tabindex]:not([tabindex="-1"])'
-        )
-      ).filter((node) => node.offsetParent !== null)
-      if (nodes.length === 0) return
-      const first = nodes[0]
-      const last = nodes[nodes.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKey, true)
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.removeEventListener('keydown', onKey, true)
-      document.body.style.overflow = previousOverflow
-    }
-  }, [open, panelRef, initialFocusRef])
-}
 
 /** 播放弹层：原生 <video controls>，服务端 /media/out 已支持 Range。 */
 function PlayerDialog({ item, onClose }: { item: Delivery; onClose: () => void }) {
@@ -321,7 +279,7 @@ function DeleteDialog({
           </dd>
           <dt className="text-apple-subtext">文件大小</dt>
           <dd className="font-medium" data-testid="delivery-delete-size">
-            {formatBytes(item.bytes)}
+            {formatBytes(item.bytes, BYTE_OPTS)}
           </dd>
         </dl>
         {error && (
@@ -424,7 +382,7 @@ function MoreMenu({
       window.removeEventListener('resize', dismiss)
       window.removeEventListener('scroll', dismiss, true)
     }
-  }, [open])
+  }, [open, buttonRef])
 
   const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const items = [...(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
@@ -504,15 +462,6 @@ function DeliveryCard({
   const repair = item.repair ?? null
   const sources = [item.coverUrl, item.poster].filter((value): value is string => Boolean(value))
 
-  const deleteFailure = (err: unknown): string => {
-    if (err instanceof HttpError) {
-      if (err.status === 401) return `需要写入令牌（401）：${err.message}`
-      if (err.status === 403) return `同源限制（403）：${err.message}`
-      return err.message
-    }
-    return err instanceof Error ? err.message : '删除失败，请稍后重试。'
-  }
-
   const confirmDelete = async () => {
     if (deleting) return
     setDeleting(true)
@@ -524,7 +473,7 @@ function DeliveryCard({
       setConfirmOpen(false)
       onDeleted(item, result)
     } catch (err) {
-      setDeleteError(deleteFailure(err))
+      setDeleteError(formatHttpError(err, '删除失败，请稍后重试。'))
     } finally {
       setDeleting(false)
     }
@@ -533,156 +482,160 @@ function DeliveryCard({
   return (
     <>
       <article
-      data-testid="delivery-card"
-      data-job-id={item.jobId}
-      data-created-at={item.createdAt ?? ''}
-      data-repaired={repair?.repaired ? 'true' : 'false'}
-      className="card card-interactive flex h-full flex-col overflow-hidden"
-    >
-      <div className="relative aspect-video w-full overflow-hidden bg-[#ECECEF]">
-        <Cover sources={sources} title={item.title} />
-        <span
-          data-testid="delivery-duration"
-          className="num pointer-events-none absolute bottom-2 right-2 inline-flex h-6 items-center rounded-full bg-black/60 px-2 text-[11px] font-medium text-white backdrop-blur-md"
-        >
-          {formatDuration(item.durationS)}
-        </span>
-      </div>
-
-      <div className="flex flex-1 flex-col p-4">
-        <div className="flex flex-wrap items-center gap-2">
+        data-testid="delivery-card"
+        data-job-id={item.jobId}
+        data-created-at={item.createdAt ?? ''}
+        data-repaired={repair?.repaired ? 'true' : 'false'}
+        className="card card-interactive flex h-full flex-col overflow-hidden"
+      >
+        <div className="relative aspect-video w-full overflow-hidden bg-[#ECECEF]">
+          <Cover sources={sources} title={item.title} />
           <span
-            data-gate={item.gate}
-            className={`rounded px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${gateTone(item.gate)}`}
+            data-testid="delivery-duration"
+            className="num pointer-events-none absolute bottom-2 right-2 inline-flex h-6 items-center rounded-md bg-black/65 px-2 text-[11px] font-medium text-white backdrop-blur-md"
           >
-            {item.gate}
+            {formatDuration(item.durationS)}
           </span>
-          {repair?.repaired && (
-            <span
-              data-testid="repaired-badge"
-              className="rounded bg-[#EAF8EE] px-1.5 py-0.5 text-[11px] font-medium text-[#1E7A3C] ring-1 ring-inset ring-[#CDEED6]"
-            >
-              已修复
-            </span>
-          )}
         </div>
 
-        <h2 className="mt-2 line-clamp-2 text-[15px] font-semibold leading-snug tracking-tight" title={item.title}>
-          {item.title}
-        </h2>
+        <div className="flex flex-1 flex-col p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            {(() => {
+              const gt = gateTone(item.gate)
+              return (
+                <span data-gate={item.gate} className={`inline-flex items-center gap-1.5 text-[11px] font-semibold ${gt.text}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${gt.dot}`} aria-hidden="true" />
+                  {item.gate}
+                </span>
+              )
+            })()}
+            {repair?.repaired && (
+              <span
+                data-testid="repaired-badge"
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-[#1E7A3C]"
+              >
+                · 已修复
+              </span>
+            )}
+          </div>
 
-        <p className="num mt-1 text-xs text-apple-subtext">
-          {formatDuration(item.durationS)} · {formatResolution(item.width, item.height)}
-        </p>
+          <h2 className="mt-2 line-clamp-2 text-[15px] font-semibold leading-snug tracking-tight" title={item.title}>
+            {item.title}
+          </h2>
 
-        <p className="mt-2 text-xs text-apple-subtext" data-testid="delivery-score" data-score={item.score ?? ''}>
-          <span className="text-apple-subtext">判定 </span>
-          <span className="num font-medium text-apple-text">{item.score != null ? item.score : '仅报数'}</span>
-        </p>
+          <p className="num mt-1 text-xs text-apple-subtext">
+            {formatDuration(item.durationS)} · {formatResolution(item.width, item.height)}
+          </p>
 
-        <p className="num mt-1 text-[11px] text-apple-subtext" data-testid="delivery-created-at">
-          {stamp(item.createdAt)}
-        </p>
+          <p className="mt-2 text-xs text-apple-subtext" data-testid="delivery-score" data-score={item.score ?? ''}>
+            <span className="text-apple-subtext">判定 </span>
+            <span className="num font-medium text-apple-text">{item.score != null ? item.score : '仅报数'}</span>
+          </p>
 
-        {/* #102：成片标题保持可读；原始 jobId 降为底部小号等宽，仍可点进详情排障。 */}
-        <Link
-          to={`/job/${item.jobId}`}
-          className="num mt-1 inline-block max-w-full truncate text-[10px] leading-relaxed text-apple-subtext underline-offset-2 hover:text-apple-text hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-          title={`任务 ID ${item.jobId}`}
-        >
-          任务 ID {item.jobId}
-        </Link>
+          <p className="num mt-1 text-[11px] text-apple-subtext" data-testid="delivery-created-at">
+            {item.createdAt ? formatFullStamp(item.createdAt) : '无数据'}
+          </p>
 
-        <div className="mt-auto flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-apple-line/70 pt-3">
-          <button
-            ref={playRef}
-            type="button"
-            onClick={() => setPlayOpen(true)}
-            data-testid="delivery-play"
-            className="press inline-flex h-8 items-center gap-1.5 rounded-lg bg-apple-text px-2.5 text-xs font-medium text-white transition-colors hover:bg-black focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+          {/* #102：成片标题保持可读；原始 jobId 降为底部小号等宽，仍可点进详情排障。 */}
+          <Link
+            to={`/job/${item.jobId}`}
+            className="num mt-1 inline-block max-w-full truncate text-[10px] leading-relaxed text-apple-subtext underline-offset-2 hover:text-apple-text hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+            title={`任务 ID ${item.jobId}`}
           >
-            <Play className="h-3.5 w-3.5" />
-            播放
-          </button>
-          <a
-            href={withDownload(item.mp4)}
-            download={`${item.jobId}.mp4`}
-            data-testid="download-mp4"
-            className="press inline-flex h-8 items-center rounded-lg bg-apple-bg px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-[#ECECEF] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-          >
-            下载 MP4
-          </a>
-          {item.report ? (
+            任务 ID {item.jobId}
+          </Link>
+
+          <div className="mt-auto flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-apple-line/70 pt-3">
+            <button
+              ref={playRef}
+              type="button"
+              onClick={() => setPlayOpen(true)}
+              data-testid="delivery-play"
+              className="press inline-flex h-8 items-center gap-1.5 rounded-lg bg-apple-text px-2.5 text-xs font-medium text-white transition-colors hover:bg-black focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+            >
+              <Play className="h-3.5 w-3.5" />
+              播放
+            </button>
             <a
-              href={withDownload(item.report)}
-              download={`${item.jobId}-report.md`}
-              data-testid="download-report"
+              href={withDownload(item.mp4)}
+              download={`${item.jobId}.mp4`}
+              data-testid="download-mp4"
               className="press inline-flex h-8 items-center rounded-lg bg-apple-bg px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-[#ECECEF] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
             >
-              下载报告
+              下载 MP4
             </a>
-          ) : (
-            <span className="text-xs text-apple-subtext">报告 无数据</span>
-          )}
-          <div className="ml-auto flex items-center gap-2">
-            {repair && (
-              <button
-                type="button"
-                onClick={() => setOpen((value) => !value)}
-                aria-expanded={open}
-                aria-controls={`repair-${item.jobId}`}
-                data-testid="repair-toggle"
-                className="inline-flex items-center gap-1 text-xs font-medium text-apple-blue focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+            {item.report ? (
+              <a
+                href={withDownload(item.report)}
+                download={`${item.jobId}-report.md`}
+                data-testid="download-report"
+                className="press inline-flex h-8 items-center rounded-lg bg-apple-bg px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-[#ECECEF] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
               >
-                修复记录
-                <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ease-apple ${open ? 'rotate-180' : ''}`} />
-              </button>
+                下载报告
+              </a>
+            ) : (
+              <span className="text-xs text-apple-subtext">报告 无数据</span>
             )}
-            <MoreMenu label={`更多操作：${item.title}`} triggerRef={moreRef}>
-              {(close) => (
-                <>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    data-testid="share-menu-item"
-                    onClick={() => {
-                      close()
-                      setShareOpen(true)
-                    }}
-                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-apple-text transition-colors hover:bg-black/[0.04] focus:outline-none focus-visible:bg-black/[0.05] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-apple-blue/50"
-                  >
-                    <Share className="h-3.5 w-3.5 text-apple-subtext" />
-                    分享
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    data-testid="delivery-delete"
-                    onClick={() => {
-                      close()
-                      setDeleteError(null)
-                      setConfirmOpen(true)
-                    }}
-                    className="mt-0.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-[#B3261E] transition-colors hover:bg-[#FCEDEB] focus:outline-none focus-visible:bg-[#FCEDEB] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#B3261E]/40"
-                  >
-                    <Trash className="h-3.5 w-3.5" />
-                    删除（移入回收站）
-                  </button>
-                </>
+            <div className="ml-auto flex items-center gap-2">
+              {repair && (
+                <button
+                  type="button"
+                  onClick={() => setOpen((value) => !value)}
+                  aria-expanded={open}
+                  aria-controls={`repair-${item.jobId}`}
+                  data-testid="repair-toggle"
+                  className="inline-flex items-center gap-1 text-xs font-medium text-apple-blue focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+                >
+                  修复记录
+                  <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ease-apple ${open ? 'rotate-180' : ''}`} />
+                </button>
               )}
-            </MoreMenu>            <ShareButton
-              path={item.mp4}
-              name={item.title}
-              hideTrigger
-              open={shareOpen}
-              onOpenChange={setShareOpen}
-              returnFocusRef={moreRef}
-            />
+              <MoreMenu label={`更多操作：${item.title}`} triggerRef={moreRef}>
+                {(close) => (
+                  <>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-testid="share-menu-item"
+                      onClick={() => {
+                        close()
+                        setShareOpen(true)
+                      }}
+                      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-apple-text transition-colors hover:bg-black/[0.04] focus:outline-none focus-visible:bg-black/[0.05] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-apple-blue/50"
+                    >
+                      <Share className="h-3.5 w-3.5 text-apple-subtext" />
+                      分享
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-testid="delivery-delete"
+                      onClick={() => {
+                        close()
+                        setDeleteError(null)
+                        setConfirmOpen(true)
+                      }}
+                      className="mt-0.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-[#B3261E] transition-colors hover:bg-[#FCEDEB] focus:outline-none focus-visible:bg-[#FCEDEB] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#B3261E]/40"
+                    >
+                      <Trash className="h-3.5 w-3.5" />
+                      删除（移入回收站）
+                    </button>
+                  </>
+                )}
+              </MoreMenu>
+              <ShareButton
+                path={item.mp4}
+                name={item.title}
+                hideTrigger
+                open={shareOpen}
+                onOpenChange={setShareOpen}
+                returnFocusRef={moreRef}
+              />
+            </div>
           </div>
         </div>
-      </div>
 
-      {open && repair && <RepairPanel repair={repair} jobId={item.jobId} />}
+        {open && repair && <RepairPanel repair={repair} jobId={item.jobId} />}
       </article>
 
       {playOpen && (
@@ -713,24 +666,65 @@ function DeliveryCard({
 }
 
 export function DeliveriesPage() {
-  const { status, data, error, retry } = useJson<DeliveriesResponse>('/api/deliveries')
+  const { status, data, error, refreshing, retry, refresh } = useJson<DeliveriesResponse>('/api/deliveries')
   const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(() => new Set())
-  const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null)
-  const deliveries = (data?.deliveries ?? []).filter((item) => !removedIds.has(item.jobId))
+  const { toast, showToast } = useToast(4000)
+  const [query, setQuery] = useState('')
+  const [gateFilter, setGateFilter] = useState<GateFilter>('all')
+  const [onlyRepaired, setOnlyRepaired] = useState(false)
+  const [sortBy, setSortBy] = useState<SortKey>('default')
 
-  const onDeleted = useCallback((item: Delivery, result: DeliveryTrashResponse) => {
-    setRemovedIds((current) => new Set(current).add(item.jobId))
-    setToast({
-      tone: 'success',
-      message: `已将 ${item.jobId} 移入回收站（${formatBytes(result.bytes)}），可人工移回恢复。`
+  const deliveries = useMemo(
+    () => (data?.deliveries ?? []).filter((item) => !removedIds.has(item.jobId)),
+    [data?.deliveries, removedIds]
+  )
+
+  const counts = useMemo(
+    () => ({
+      all: deliveries.length,
+      PASS: deliveries.filter((d) => matchesGateFilter(d.gate, 'PASS')).length,
+      CONDITIONAL: deliveries.filter((d) => matchesGateFilter(d.gate, 'CONDITIONAL')).length,
+      FAIL: deliveries.filter((d) => matchesGateFilter(d.gate, 'FAIL')).length,
+      repaired: deliveries.filter((d) => d.repair?.repaired).length
+    }),
+    [deliveries]
+  )
+
+  const visibleDeliveries = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const filtered = deliveries.filter((item) => {
+      if (!matchesGateFilter(item.gate, gateFilter)) return false
+      if (onlyRepaired && !item.repair?.repaired) return false
+      if (!q) return true
+      return item.jobId.toLowerCase().includes(q) || item.title.toLowerCase().includes(q)
     })
-  }, [])
+    if (sortBy === 'default') return filtered
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'newest') {
+        return Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? '')
+      }
+      if (sortBy === 'duration') {
+        return (b.durationS ?? -1) - (a.durationS ?? -1)
+      }
+      return scoreSortValue(b.score) - scoreSortValue(a.score)
+    })
+  }, [deliveries, query, gateFilter, onlyRepaired, sortBy])
 
-  useEffect(() => {
-    if (!toast) return
-    const timer = window.setTimeout(() => setToast(null), 4000)
-    return () => window.clearTimeout(timer)
-  }, [toast])
+  const batch = useInfiniteScrollBatch(
+    visibleDeliveries.length,
+    12,
+    12,
+    `${query}|${gateFilter}|${onlyRepaired}|${sortBy}`
+  )
+  const pagedDeliveries = visibleDeliveries.slice(0, batch.visibleCount)
+
+  const onDeleted = useCallback(
+    (item: Delivery, result: DeliveryTrashResponse) => {
+      setRemovedIds((current) => new Set(current).add(item.jobId))
+      showToast(`已将 ${item.jobId} 移入回收站（${formatBytes(result.bytes, BYTE_OPTS)}），可人工移回恢复。`, 'ok')
+    },
+    [showToast]
+  )
 
   return (
     <div>
@@ -741,9 +735,15 @@ export function DeliveriesPage() {
             真实成片、封面裁切、AI 修复记录与下载入口；可在线播放，删除会移入 NAS 回收站（可人工恢复）。
           </p>
         </div>
-        <p className="num text-[11px] leading-relaxed text-apple-subtext">
-          数据 /api/deliveries · 来源 {data?.meta.source ?? '无数据'} · {deliveries.length} 个成片
-        </p>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <p className="num text-[11px] leading-relaxed text-apple-subtext">
+            来源 {data?.meta.source ?? '无数据'} · {deliveries.length} 个成片
+          </p>
+          <ToolButton onClick={refresh} disabled={refreshing}>
+            <Refresh className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            {refreshing ? '刷新中' : '刷新'}
+          </ToolButton>
+        </div>
       </header>
 
       {status === 'loading' && (
@@ -775,20 +775,114 @@ export function DeliveriesPage() {
         <div className="card mt-5 p-5">
           <p className="text-sm font-medium">暂无交付产物</p>
           <p className="mt-1 text-xs leading-relaxed text-apple-subtext">
-            /api/deliveries 返回 0 个成片；/media/out 下还没有可交付的 mp4。
+            当前暂无可交付成片，前往创作工坊生成或美化导出后将自动汇总至此。
           </p>
         </div>
       )}
 
       {deliveries.length > 0 && (
         <>
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-equal-grid data-stagger>
-            {deliveries.map((item) => (
-              <DeliveryCard key={item.jobId} item={item} onDeleted={onDeleted} />
-            ))}
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <FilterChipGroup
+                label="按门禁结果筛选"
+                value={gateFilter}
+                onChange={setGateFilter}
+                options={[
+                  { key: 'all', label: '全部', count: counts.all },
+                  { key: 'PASS', label: 'PASS', count: counts.PASS },
+                  { key: 'CONDITIONAL', label: '有条件', count: counts.CONDITIONAL },
+                  { key: 'FAIL', label: 'FAIL', count: counts.FAIL }
+                ]}
+              />
+              {counts.repaired > 0 && (
+                <button
+                  type="button"
+                  aria-pressed={onlyRepaired}
+                  onClick={() => setOnlyRepaired((v) => !v)}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 ${
+                    onlyRepaired
+                      ? 'border-apple-text bg-apple-text text-white'
+                      : 'border-apple-line bg-white text-apple-text hover:bg-[#FAFAFB]'
+                  }`}
+                >
+                  仅看已修复
+                  <span className={`num ${onlyRepaired ? 'text-white/80' : 'text-apple-subtext'}`}>
+                    {counts.repaired}
+                  </span>
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape' && query) setQuery('')
+                }}
+                placeholder="搜索标题或 jobId"
+                aria-label="搜索交付成片"
+                className="h-8 w-48 rounded-lg border border-black/[0.09] bg-white px-3 text-xs text-apple-text placeholder:text-apple-subtext focus:border-apple-blue focus:outline-none"
+              />
+              <div className="inline-flex items-center gap-1.5 text-xs text-apple-subtext">
+                <span>排序</span>
+                <div className="w-[126px]">
+                  <SelectMenu
+                    value={sortBy}
+                    onChange={(val) => setSortBy(val as SortKey)}
+                    ariaLabel="排序方式"
+                    align="right"
+                    size="sm"
+                    options={[
+                      { value: 'default', label: '默认' },
+                      { value: 'newest', label: '最新产出' },
+                      { value: 'duration', label: '时长优先' },
+                      { value: 'score', label: '通过率优先' }
+                    ]}
+                  />
+                </div>
+              </div>
+            </div>
           </div>
+
+          {visibleDeliveries.length === 0 ? (
+            <div className="card mt-4 p-5">
+              <p className="text-sm font-medium">没有匹配的交付产物</p>
+              <p className="mt-1 text-xs text-apple-subtext">可清空搜索关键字或切换门禁筛选条件。</p>
+            </div>
+          ) : (
+            <>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-equal-grid data-stagger>
+                {pagedDeliveries.map((item) => (
+                  <DeliveryCard key={item.jobId} item={item} onDeleted={onDeleted} />
+                ))}
+              </div>
+              <div
+                ref={batch.sentinelRef}
+                data-testid="deliveries-lazy-sentinel"
+                className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-black/[0.06] pt-3 text-xs text-apple-subtext"
+              >
+                <span className="num">
+                  已加载 {pagedDeliveries.length} / {visibleDeliveries.length} 支成片
+                  {batch.hasMore ? ' · 向下滚动自动懒加载' : ' · 已全部加载'}
+                </span>
+                {batch.hasMore && (
+                  <button
+                    type="button"
+                    onClick={batch.loadMore}
+                    className="rounded-lg border border-black/[0.08] bg-white px-2.5 py-1 text-xs font-medium text-apple-text transition-colors hover:bg-black/[0.03]"
+                  >
+                    加载更多
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+
           <p className="mt-4 text-[11px] leading-relaxed text-apple-subtext">
-            封面优先 cover_16x9.jpg，缺失时回退 poster，再缺显示灰底占位；封面统一 object-cover 裁切。
+            封面优先 cover_16x9.jpg，缺失时回退 poster，再缺显示灰底占位；封面统一 object-cover 裁切并启用下拉懒加载。
           </p>
         </>
       )}
@@ -801,10 +895,10 @@ export function DeliveriesPage() {
         {toast && (
           <p
             data-testid="delivery-toast"
-            data-tone={toast.tone}
+            data-tone={toast.tone === 'err' ? 'error' : 'success'}
             className="pointer-events-auto max-w-[min(560px,100%)] rounded-xl bg-apple-text px-4 py-2.5 text-center text-xs font-medium leading-relaxed text-white shadow-lift"
           >
-            {toast.message}
+            {toast.text}
           </p>
         )}
       </div>

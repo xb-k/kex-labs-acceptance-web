@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SnapshotRule } from './types'
-import { explainRule, overallVerdict } from './qc-explain'
+import { explainJobSummaryRow, explainRule, overallVerdict } from './qc-explain'
 
 function rule(partial: Partial<SnapshotRule> & Pick<SnapshotRule, 'id'>): SnapshotRule {
   return {
@@ -92,4 +92,47 @@ test('#106 本页 7 条 policy 规则都有白话与建议动作', () => {
     assert.ok(explanation.why.length >= 8, `${id} 缺少原因`)
     assert.ok(explanation.action.length >= 8, `${id} 缺少建议动作`)
   }
+})
+
+test('非专业人员看得懂的 QC 指标与逐行白话结论翻译准确且保留缺失边界', () => {
+  for (const id of [
+    'B1_ssim_mean',
+    'B2_noise_change_pct',
+    'B2_net_gain_vs_baseline_ratio',
+    'B3_ghost_ratio_median'
+  ]) {
+    const exp = explainRule(id)
+    assert.ok(exp.plain.length >= 12, `${id} 缺少白话解释`)
+    assert.ok(exp.action.length >= 8, `${id} 缺少处理动作`)
+  }
+
+  const passSummary = explainJobSummaryRow({
+    jobId: 'j1',
+    taskId: 't1',
+    status: 'PASS',
+    passed: 4,
+    judged: 4,
+    ssim: 0.91,
+    noiseChangePct: -22,
+    netGain: 2.1,
+    ghostRatio: 0.9,
+    hasQc: true
+  })
+  assert.equal(passSummary.headline, '可直接发布')
+  assert.match(passSummary.detail, /画面高清不糊/)
+  assert.match(passSummary.detail, /雪花噪点减少 22%/)
+
+  const pendingSummary = explainJobSummaryRow({
+    jobId: 'j2',
+    taskId: 't2',
+    status: 'UNKNOWN',
+    passed: 0,
+    judged: 0,
+    ssim: null,
+    noiseChangePct: null,
+    netGain: null,
+    ghostRatio: null,
+    hasQc: false
+  })
+  assert.equal(pendingSummary.headline, '尚未出检')
 })

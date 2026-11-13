@@ -1,57 +1,57 @@
-import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
 import { useSystem } from '../api'
-import { useIssues } from '../issues'
+import { formatGb } from '../format'
+import { useModalA11y } from '../hooks'
 import type { SystemSnapshot } from '../types'
-import { Bot, Chart, Clapper, Close, ExternalLink, Film, Flow, Folder, Grid, Inbox, Menu, Plus, Server, Shield, Sliders } from './icons'
+import {
+  Bot,
+  Clapper,
+  Close,
+  Film,
+  Flow,
+  Folder,
+  Menu,
+  Refresh,
+  Server,
+  Shield
+} from './icons'
 import { Link, useRouter } from '../router'
-import { needsIntranet } from '../url'
+import { BrandLockup } from './BrandLogo'
+import { ErrorBoundary } from './ui'
 
-type NavEntry = { to: string; label: string; icon: ComponentType<{ className?: string }> }
+type NavEntry = { to: string; label: string; keywords?: string; icon: ComponentType<{ className?: string }> }
 
-/**
- * 导航按用户任务心智分组（#104）：概览 → 创作 → 任务与质量 → 交付与协作。
- * 同一路由只出现一次；分组标题仅作视觉/语义分隔，不额外制造焦点。
- */
 const NAV_GROUPS: Array<{ id: string; title: string; items: NavEntry[] }> = [
   {
-    id: 'overview',
-    title: '概览',
-    items: [
-      { to: '/', label: '工作台总览', icon: Grid },
-      { to: '/status', label: '项目状态', icon: Server }
-    ]
-  },
-  {
     id: 'create',
-    title: '创作',
+    title: '制片与创作',
     items: [
-      { to: '/studio', label: '创作工坊', icon: Clapper },
-      { to: '/flow', label: '自动编排监看', icon: Flow },
-      { to: '/pipeline', label: '渲染工作台与契约', icon: Sliders }
+      { to: '/', label: '视频生产总台', keywords: 'production tracker overview kpi dashboard agents pipeline', icon: Flow },
+      { to: '/studio', label: '双轨创作工坊', keywords: 'studio brief script image optimize upload aigc', icon: Clapper }
     ]
   },
   {
     id: 'quality',
-    title: '任务与质量',
+    title: '任务与品控',
     items: [
-      { to: '/jobs', label: '任务中心', icon: Film },
-      { to: '/qc', label: 'QC 质量门禁', icon: Shield }
+      { to: '/jobs', label: '任务中心', keywords: 'jobs b-track studio queue', icon: Film },
+      { to: '/qc', label: 'QC 质量门禁', keywords: 'qc gate ssim lapvar rules', icon: Shield }
     ]
   },
   {
-    id: 'handoff',
-    title: '交付与协作',
+    id: 'assets',
+    title: '资产与策略',
     items: [
-      { to: '/deliveries', label: '交付与资产', icon: Folder },
-      { to: '/reports', label: '报表与周报', icon: Chart },
-      { to: '/issues', label: 'Issue 收件箱', icon: Inbox },
-      { to: '/agents', label: 'Agent 库', icon: Bot }
+      { to: '/deliveries', label: '交付成片库', keywords: 'deliveries mp4 cover trash', icon: Folder },
+      { to: '/agents', label: 'Agent 与提示词库', keywords: 'agents skills profiles lut prompts', icon: Bot }
     ]
   }
 ]
 
+const ALL_NAV_ITEMS = NAV_GROUPS.flatMap((g) => g.items.map((item) => ({ ...item, group: g.title })))
+
 function isActive(path: string, to: string): boolean {
-  if (to === '/') return path === '/' || path === ''
+  if (to === '/') return path === '/' || path === '' || path === '/overview'
   if (to === '/jobs') return path === '/jobs' || path.startsWith('/job/')
   return path === to || path.startsWith(`${to}/`)
 }
@@ -118,14 +118,6 @@ function NavGroup({
   )
 }
 
-function gb(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  const n = value / 1024 ** 3
-  return n >= 10 ? n.toFixed(0) : n.toFixed(1)
-}
-
-type DockKey = 'issue' | 'studio'
-
 const dockButtonClass = (active: boolean) =>
   `relative grid h-10 w-10 place-items-center rounded-[12px] border transition-colors duration-200 ease-apple focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 ${
     active
@@ -136,48 +128,52 @@ const dockButtonClass = (active: boolean) =>
 const dockPopoverClass = (closing: boolean) =>
   `${closing ? 'popover-closing' : 'popover-surface'} absolute bottom-[calc(100%+10px)] left-0 z-50 w-[300px] max-w-[calc(100vw-24px)] origin-bottom-left`
 
-function SideDock({ system }: { system: ReturnType<typeof useSystem> }) {
-  const { status, data, error, retry, openDialog, counts, webUrl } = useIssues()
-  const [open, setOpen] = useState<DockKey | null>(null)
-  const [closing, setClosing] = useState<DockKey | null>(null)
+function SideDock({
+  system,
+  onOpenPalette
+}: {
+  system: ReturnType<typeof useSystem>
+  onOpenPalette: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [closing, setClosing] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
-  const issueRef = useRef<HTMLButtonElement>(null)
   const studioRef = useRef<HTMLButtonElement>(null)
   const closeTimer = useRef<number | null>(null)
 
-  const active = open ?? closing
-  const isClosing = open === null && closing !== null
-  const openCount = status === 'ready' ? counts?.open ?? null : null
-  const totalCount = status === 'ready' ? counts?.total ?? null : null
-  const latest = status === 'ready' ? data.latest : null
+  const active = open || closing
+  const isClosing = !open && closing
   const sys: SystemSnapshot | null = system.data
   const online = sys?.online ?? null
   const studioStatus = system.status === 'loading' ? '检测中' : system.status === 'error' ? '不可用' : online ? '在线' : '离线'
   const studioDot =
     system.status === 'loading' ? 'bg-[#8E8E93]' : online ? 'bg-[#30A14E]' : 'bg-[#FF3B30]'
 
+  const vramRatio =
+    sys?.vram?.used != null && sys.vram.total != null && sys.vram.total > 0
+      ? Math.min(100, Math.max(0, Math.round((sys.vram.used / sys.vram.total) * 100)))
+      : null
+
   const closeDock = (returnFocus = true) => {
     if (!open) return
-    const key = open
-    setOpen(null)
-    setClosing(key)
+    setOpen(false)
+    setClosing(true)
     if (closeTimer.current) window.clearTimeout(closeTimer.current)
-    closeTimer.current = window.setTimeout(() => setClosing(null), 140)
+    closeTimer.current = window.setTimeout(() => setClosing(false), 140)
     if (returnFocus) {
-      const target = key === 'issue' ? issueRef.current : studioRef.current
-      window.setTimeout(() => target?.focus(), 0)
+      window.setTimeout(() => studioRef.current?.focus(), 0)
     }
   }
 
-  const toggle = (key: DockKey) => {
-    if (open === key) {
+  const toggle = () => {
+    if (open) {
       closeDock(true)
       return
     }
     if (closeTimer.current) window.clearTimeout(closeTimer.current)
-    setClosing(null)
-    setOpen(key)
+    setClosing(false)
+    setOpen(true)
   }
 
   useEffect(() => {
@@ -188,8 +184,6 @@ function SideDock({ system }: { system: ReturnType<typeof useSystem> }) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
-      // 捕获阶段拦下，避免同时把移动端抽屉一起关掉（一次 Esc 只关 popover）。
-      // 抽屉的 Esc 监听也挂在 document 上，同节点需 stopImmediatePropagation。
       event.stopImmediatePropagation()
       closeDock(true)
     }
@@ -218,215 +212,139 @@ function SideDock({ system }: { system: ReturnType<typeof useSystem> }) {
   )
 
   return (
-    <div ref={wrapRef} className="relative flex items-center gap-2">
-      <button
-        ref={issueRef}
-        type="button"
-        onClick={() => toggle('issue')}
-        aria-haspopup="dialog"
-        aria-expanded={open === 'issue'}
-        aria-controls="dock-issue-popover"
-        title={openCount != null ? `Issues · ${openCount} 打开` : 'Issues'}
-        className={dockButtonClass(open === 'issue')}
-      >
-        <Inbox className="h-[18px] w-[18px]" />
-        <span className="sr-only">Issues</span>
-        {openCount != null && (
-          <span
-            data-testid="dock-issue-badge"
-            className="num absolute -right-1 -top-1 grid h-4 min-w-[16px] place-items-center rounded-full bg-apple-blue px-1 text-[10px] font-semibold leading-none text-white ring-2 ring-white"
-          >
-            {openCount > 99 ? '99+' : openCount}
-          </span>
-        )}
-      </button>
-
+    <div ref={wrapRef} className="relative flex items-center justify-between gap-2">
       <button
         ref={studioRef}
         type="button"
-        onClick={() => toggle('studio')}
+        onClick={toggle}
         aria-haspopup="dialog"
-        aria-expanded={open === 'studio'}
+        aria-expanded={open}
         aria-controls="dock-studio-popover"
         title={`Studio · ${studioStatus}`}
-        className={dockButtonClass(open === 'studio')}
+        className={dockButtonClass(open)}
       >
         <Server className="h-[18px] w-[18px]" />
         <span className="sr-only">Studio</span>
         <span
           aria-hidden="true"
-          className={`absolute right-2 top-2 h-2 w-2 rounded-full ring-2 ring-white ${studioDot}`}
+          className={`absolute right-2 top-2 h-2 w-2 rounded-full ring-2 ring-white ${studioDot} ${online ? 'text-[#30A14E] live-beacon' : ''}`}
         />
+      </button>
+
+      <button
+        type="button"
+        onClick={onOpenPalette}
+        title="快速切换页面 (⌘K / Ctrl+K)"
+        className="inline-flex h-10 flex-1 items-center justify-between gap-1.5 rounded-[12px] border border-black/[0.07] bg-white/70 px-3 text-[11.5px] font-medium text-apple-subtext transition-colors hover:bg-white hover:text-apple-text focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+      >
+        <span>快速跳转</span>
+        <kbd className="num rounded bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-apple-text">⌘K</kbd>
       </button>
 
       {active && (
         <div
           ref={popRef}
-          id={`dock-${active}-popover`}
+          id="dock-studio-popover"
           role="dialog"
-          aria-label={active === 'issue' ? 'Issues 概览' : 'Studio 状态'}
+          aria-label="Studio 状态"
           className={dockPopoverClass(isClosing)}
         >
-          {active === 'issue' ? (
-            <div className="rounded-[14px] border border-black/[0.08] bg-white p-3.5 text-apple-text shadow-lift">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="text-[13px] font-semibold tracking-[-0.01em]">Issues</span>
-                <span className="text-[11px] text-apple-subtext">
-                  {status === 'loading'
-                    ? '检测中'
-                    : status === 'error'
-                      ? '不可用'
-                      : counts
-                        ? `共 ${counts.total} 条`
-                        : '无数据'}
-                </span>
-              </div>
-
-              {status === 'ready' ? (
-                <Link
-                  to="/issues"
-                  onClick={() => closeDock(false)}
-                  data-popover-focus
-                  className="-mx-2 mt-2 block rounded-lg p-2 transition-colors hover:bg-apple-bg/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-                >
-                  <span className="flex items-baseline gap-1">
-                    <span
-                      data-testid="dock-issue-open-count"
-                      className="num text-[22px] font-semibold leading-none tracking-[-0.02em]"
-                    >
-                      {openCount ?? 0}
-                    </span>
-                    <span className="text-[11px] text-apple-subtext">打开</span>
-                    {totalCount != null && (
-                      <span className="num ml-1 text-[11px] text-apple-subtext">/ {totalCount}</span>
-                    )}
-                  </span>
-                  <span
-                    className="mt-1 block truncate text-[12px] leading-5 text-apple-subtext"
-                    title={latest?.title ?? undefined}
-                  >
-                    {latest ? `最近 · ${latest.title}` : openCount === 0 ? '没有打开的 issue' : '无数据'}
-                  </span>
-                  <span className="mt-0.5 block text-[11px] font-medium text-apple-blueInk">查看全部 →</span>
-                </Link>
-              ) : status === 'loading' ? (
-                <p className="mt-2 text-[12px] leading-5 text-apple-subtext">读取 /api/issues…</p>
-              ) : status === 'error' ? (
-                <div className="mt-2">
-                  <p className="text-[12px] leading-5 text-apple-subtext">Gitea 不可用</p>
-                  <p className="mt-0.5 line-clamp-2 break-words text-[11px] leading-4 text-apple-subtext" title={error ?? undefined}>
-                    {error ?? '请求失败'}
-                  </p>
-                  <button
-                    type="button"
-                    data-popover-focus
-                    onClick={retry}
-                    className="mt-1 rounded text-[11px] font-medium text-apple-blueInk underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-                  >
-                    重试
-                  </button>
-                </div>
-              ) : (
-                <p className="mt-2 text-[12px] leading-5 text-apple-subtext">暂无 issue</p>
-              )}
-
-              <div className="mt-2.5 space-y-2 border-t border-black/[0.06] pt-2">
-                {webUrl && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <a
-                      href={webUrl}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      data-popover-focus
-                      className="inline-flex items-center gap-1 rounded text-[11px] font-medium text-apple-blueInk underline-offset-2 transition-colors hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-                    >
-                      在 Gitea 查看
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                    {needsIntranet(webUrl) && (
-                      <span
-                        data-testid="gitea-intranet-hint"
-                        className="rounded bg-black/[0.05] px-1 py-0.5 text-[10px] leading-4 text-apple-subtext"
-                      >
-                        需内网/Tailscale
-                      </span>
-                    )}
-                  </div>
-                )}
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-apple-subtext">数据 /api/issues</span>
-                  <button
-                    type="button"
-                    data-popover-focus
-                    onClick={() => {
-                      closeDock(false)
-                      openDialog()
-                    }}
-                    className="inline-flex items-center gap-1 rounded-full bg-apple-blue px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[#0062C4] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-                  >
-                    <Plus className="h-3 w-3" />
-                    新建
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div
-              data-popover-focus
-              tabIndex={-1}
-              className="glass-dark rounded-[14px] p-3.5 text-white focus:outline-none"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <span className="text-[12px] font-semibold tracking-[-0.01em]">Mac Studio</span>
+          <div
+            data-popover-focus
+            tabIndex={-1}
+            className="glass-dark rounded-[14px] p-3.5 text-white focus:outline-none"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[12px] font-semibold tracking-[-0.01em]">Mac Studio</span>
+              <div className="flex items-center gap-2">
                 <span
                   className={`flex items-center gap-1.5 text-[11px] font-medium ${
                     online === null ? 'text-white/60' : online ? 'text-[#7BE495]' : 'text-[#FF8A80]'
                   }`}
                 >
-                  <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${online === null ? 'bg-white/40' : online ? 'bg-[#30D158]' : 'bg-[#FF453A]'}`} />
+                  <span
+                    aria-hidden="true"
+                    className={`h-1.5 w-1.5 rounded-full ${online === null ? 'bg-white/40' : online ? 'bg-[#30D158]' : 'bg-[#FF453A]'}`}
+                  />
                   {studioStatus}
                 </span>
+                <button
+                  type="button"
+                  onClick={system.refresh}
+                  disabled={system.refreshing}
+                  aria-label="刷新 Studio 状态"
+                  title="刷新 Studio 状态"
+                  className="grid h-6 w-6 place-items-center rounded-full text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+                >
+                  <Refresh className={`h-3.5 w-3.5 ${system.refreshing ? 'animate-spin' : ''}`} />
+                </button>
               </div>
+            </div>
 
-              {sys && (
-                <dl className="mt-3 space-y-1.5 text-[11px] leading-4">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <dt className="text-white/60">延迟</dt>
-                    <dd className="num text-white/90">{sys.latencyMs != null ? `${sys.latencyMs} ms` : '无数据'}</dd>
+            {sys && (
+              <dl className="mt-3 space-y-1.5 text-[11px] leading-4">
+                <div className="flex items-baseline justify-between gap-2">
+                  <dt className="text-white/60">延迟</dt>
+                  <dd className="num text-white/90">{sys.latencyMs != null ? `${sys.latencyMs} ms` : '无数据'}</dd>
+                </div>
+                <div className="flex items-baseline justify-between gap-2">
+                  <dt className="text-white/60">VRAM 空闲</dt>
+                  <dd className="num text-white/90">
+                    {sys.vram?.free != null ? (
+                      <>
+                        {formatGb(sys.vram.free)} <span className="text-white/60">/ {formatGb(sys.vram.total)} GB</span>
+                      </>
+                    ) : (
+                      '无数据'
+                    )}
+                  </dd>
+                </div>
+                {vramRatio !== null && (
+                  <div className="pt-0.5">
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+                      <div
+                        className={`h-full rounded-full transition-all duration-300 ${
+                          vramRatio >= 85 ? 'bg-[#FF453A]' : vramRatio >= 65 ? 'bg-[#FF9F0A]' : 'bg-[#30D158]'
+                        }`}
+                        style={{ width: `${vramRatio}%` }}
+                      />
+                    </div>
                   </div>
+                )}
+                {sys.ram && (
                   <div className="flex items-baseline justify-between gap-2">
-                    <dt className="text-white/60">VRAM 空闲</dt>
+                    <dt className="text-white/60">统一内存空闲</dt>
                     <dd className="num text-white/90">
-                      {sys.vram?.free != null ? (
+                      {sys.ram.free != null ? (
                         <>
-                          {gb(sys.vram.free)} <span className="text-white/60">/ {gb(sys.vram.total)} GB</span>
+                          {formatGb(sys.ram.free)} <span className="text-white/60">/ {formatGb(sys.ram.total)} GB</span>
                         </>
                       ) : (
                         '无数据'
                       )}
                     </dd>
                   </div>
-                  <div className="flex items-baseline justify-between gap-2">
-                    <dt className="text-white/60">队列</dt>
-                    <dd className="num text-white/90">
-                      {sys.queue ? `${sys.queue.running} 执行 · ${sys.queue.pending} 待排` : '无数据'}
-                    </dd>
-                  </div>
-                </dl>
-              )}
+                )}
+                <div className="flex items-baseline justify-between gap-2">
+                  <dt className="text-white/60">队列</dt>
+                  <dd className="num text-white/90">
+                    {sys.queue ? `${sys.queue.running} 执行 · ${sys.queue.pending} 待排` : '无数据'}
+                  </dd>
+                </div>
+              </dl>
+            )}
 
-              {system.status === 'error' && <p className="mt-2 text-[11px] leading-4 text-white/55">状态接口不可用</p>}
-              {system.status === 'loading' && <p className="mt-2 text-[11px] leading-4 text-white/55">读取 /api/system…</p>}
-              {sys?.error && online === false && (
-                <p className="mt-2 line-clamp-2 text-[11px] leading-4 text-white/55" title={sys.error}>
-                  {sys.error}
-                </p>
-              )}
-              <p className="mt-2 border-t border-white/[0.07] pt-2 text-[11px] leading-4 text-white/55">
-                数据 /api/system · 30s 刷新
+            {system.status === 'error' && <p className="mt-2 text-[11px] leading-4 text-white/55">状态接口不可用</p>}
+            {system.status === 'loading' && <p className="mt-2 text-[11px] leading-4 text-white/55">读取 /api/system…</p>}
+            {sys?.error && online === false && (
+              <p className="mt-2 line-clamp-2 text-[11px] leading-4 text-white/55" title={sys.error}>
+                {sys.error}
               </p>
-            </div>
-          )}
+            )}
+            <p className="mt-2 border-t border-white/[0.07] pt-2 text-[11px] leading-4 text-white/55">
+              48GB Metal 上限 · 30s 刷新
+            </p>
+          </div>
         </div>
       )}
     </div>
@@ -437,20 +355,20 @@ function Brand() {
   return (
     <Link
       to="/"
-      className="flex items-center gap-2.5 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+      className="flex items-center rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
     >
-      <span className="grid h-6 w-6 place-items-center rounded-[7px] bg-gradient-to-br from-apple-accentBlue to-apple-accentPurple text-white">
-        <Film className="h-3.5 w-3.5" />
-      </span>
-      <span className="leading-tight">
-        <span className="block text-[14px] font-semibold tracking-[-0.02em]">Kex Labs</span>
-        <span className="mt-0.5 block text-[11px] text-apple-subtext">视频工作台</span>
-      </span>
+      <BrandLockup />
     </Link>
   )
 }
 
-function Sidebar({ system }: { system: ReturnType<typeof useSystem> }) {
+function Sidebar({
+  system,
+  onOpenPalette
+}: {
+  system: ReturnType<typeof useSystem>
+  onOpenPalette: () => void
+}) {
   return (
     <aside className="glass-sidebar fixed inset-y-0 left-0 z-30 hidden w-[236px] flex-col lg:flex">
       <div className="px-4 pb-5 pt-6">
@@ -462,7 +380,7 @@ function Sidebar({ system }: { system: ReturnType<typeof useSystem> }) {
         ))}
       </nav>
       <div className="p-3">
-        <SideDock system={system} />
+        <SideDock system={system} onOpenPalette={onOpenPalette} />
       </div>
     </aside>
   )
@@ -471,47 +389,20 @@ function Sidebar({ system }: { system: ReturnType<typeof useSystem> }) {
 function MobileDrawer({
   open,
   onClose,
-  system
+  system,
+  onOpenPalette,
+  restoreFocusRef
 }: {
   open: boolean
   onClose: () => void
   system: ReturnType<typeof useSystem>
+  onOpenPalette: () => void
+  restoreFocusRef: React.RefObject<HTMLButtonElement | null>
 }) {
   const panelRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
 
-  useEffect(() => {
-    if (!open) return
-    closeRef.current?.focus()
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onClose()
-        return
-      }
-      if (event.key !== 'Tab' || !panelRef.current) return
-      const nodes = Array.from(
-        panelRef.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')
-      ).filter((node) => node.offsetParent !== null)
-      if (nodes.length === 0) return
-      const first = nodes[0]
-      const last = nodes[nodes.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.removeEventListener('keydown', onKey)
-      document.body.style.overflow = previousOverflow
-    }
-  }, [open, onClose])
+  useModalA11y(open, panelRef, onClose, closeRef, restoreFocusRef)
 
   if (!open) return null
 
@@ -549,8 +440,131 @@ function MobileDrawer({
           ))}
         </nav>
         <div className="p-3">
-          <SideDock system={system} />
+          <SideDock
+            system={system}
+            onOpenPalette={() => {
+              onClose()
+              onOpenPalette()
+            }}
+          />
         </div>
+      </div>
+    </div>
+  )
+}
+
+function QuickRoutePalette({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { path, navigate } = useRouter()
+  const [query, setQuery] = useState('')
+  const [cursor, setCursor] = useState(0)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useModalA11y(open, panelRef, onClose, inputRef)
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return ALL_NAV_ITEMS
+    return ALL_NAV_ITEMS.filter(
+      (item) =>
+        item.label.toLowerCase().includes(q) ||
+        item.to.toLowerCase().includes(q) ||
+        item.group.toLowerCase().includes(q) ||
+        (item.keywords && item.keywords.includes(q))
+    )
+  }, [query])
+
+  useEffect(() => {
+    if (open) {
+      setQuery('')
+      setCursor(0)
+    }
+  }, [open])
+
+  useEffect(() => {
+    setCursor(0)
+  }, [query])
+
+  if (!open) return null
+
+  const go = (to: string) => {
+    onClose()
+    navigate(to)
+  }
+
+  return (
+    <div className="dialog-overlay fixed inset-0 z-50 flex items-start justify-center bg-black/30 px-4 pt-[12vh] backdrop-blur-[2px]">
+      <button type="button" aria-label="关闭快速跳转" onClick={onClose} className="fixed inset-0 cursor-default" tabIndex={-1} />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="快速跳转工作台页面"
+        className="dialog-panel relative z-10 w-full max-w-[480px] overflow-hidden rounded-[18px] border border-black/[0.08] bg-white shadow-lift"
+      >
+        <div className="flex items-center gap-2 border-b border-apple-line px-4 py-3">
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setCursor((c) => (matches.length ? (c + 1) % matches.length : 0))
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setCursor((c) => (matches.length ? (c - 1 + matches.length) % matches.length : 0))
+              } else if (e.key === 'Enter' && matches[cursor]) {
+                e.preventDefault()
+                go(matches[cursor].to)
+              }
+            }}
+            placeholder="输入页面名称或路由，例如 创作、QC、Agent…"
+            className="w-full bg-transparent text-[14px] text-apple-text placeholder:text-apple-subtext/70 focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md bg-[#F2F2F7] px-2 py-0.5 text-[11px] font-medium text-apple-subtext hover:text-apple-text"
+          >
+            ESC
+          </button>
+        </div>
+
+        <ul className="max-h-[340px] overflow-y-auto p-2" role="listbox" aria-label="页面列表">
+          {matches.map((item, idx) => {
+            const Icon = item.icon
+            const active = isActive(path, item.to)
+            const selected = idx === cursor
+            return (
+              <li key={item.to}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  onMouseEnter={() => setCursor(idx)}
+                  onClick={() => go(item.to)}
+                  className={`flex w-full items-center justify-between gap-3 rounded-[11px] px-3 py-2.5 text-left transition-colors ${
+                    selected ? 'bg-[#EEF5FF] text-apple-blueInk' : 'text-apple-text hover:bg-[#F5F5F7]'
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5 min-w-0">
+                    <Icon className={`h-4 w-4 shrink-0 ${selected ? 'text-apple-blue' : 'text-apple-subtext'}`} />
+                    <span className="truncate text-[13px] font-medium">{item.label}</span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2 text-[11px] text-apple-subtext">
+                    {active && <span className="rounded bg-black/[0.06] px-1.5 py-0.5 text-[10px]">当前</span>}
+                    <span>{item.group}</span>
+                  </span>
+                </button>
+              </li>
+            )
+          })}
+          {matches.length === 0 && (
+            <li className="px-4 py-8 text-center text-[13px] text-apple-subtext">没有匹配的页面</li>
+          )}
+        </ul>
       </div>
     </div>
   )
@@ -560,36 +574,57 @@ export function Shell({ children }: { children: ReactNode }) {
   const { path } = useRouter()
   const system = useSystem()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const menuRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     setDrawerOpen(false)
   }, [path])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setPaletteOpen((prev) => !prev)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   const closeDrawer = () => {
     setDrawerOpen(false)
-    window.setTimeout(() => menuRef.current?.focus(), 0)
   }
 
   return (
     <div className="min-h-dvh font-sans text-apple-text">
-      <Sidebar system={system} />
+      <Sidebar system={system} onOpenPalette={() => setPaletteOpen(true)} />
 
       <div className="lg:pl-[236px]">
         <header className="sticky top-0 z-20 border-b border-black/[0.06] bg-white/70 backdrop-blur-xl lg:hidden">
           <div className="flex h-14 items-center justify-between gap-3 px-4">
             <Brand />
-            <button
-              ref={menuRef}
-              type="button"
-              aria-label="打开导航"
-              aria-expanded={drawerOpen}
-              aria-haspopup="dialog"
-              onClick={() => setDrawerOpen(true)}
-              className="grid h-10 w-10 place-items-center rounded-full text-apple-text transition-colors hover:bg-white/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-            >
-              <Menu className="h-5 w-5" />
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                aria-label="快速跳转页面"
+                className="inline-flex h-9 items-center gap-1 rounded-full border border-black/[0.08] bg-white/80 px-2.5 text-[11px] font-medium text-apple-subtext"
+              >
+                <span className="num">⌘K</span>
+              </button>
+              <button
+                ref={menuRef}
+                type="button"
+                aria-label="打开导航"
+                aria-expanded={drawerOpen}
+                aria-haspopup="dialog"
+                onClick={() => setDrawerOpen(true)}
+                className="grid h-10 w-10 place-items-center rounded-full text-apple-text transition-colors hover:bg-white/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            </div>
           </div>
         </header>
 
@@ -598,18 +633,27 @@ export function Shell({ children }: { children: ReactNode }) {
           tabIndex={-1}
           className="mx-auto w-full max-w-[1360px] px-4 py-6 focus:outline-none sm:px-6 lg:px-8 lg:py-8"
         >
-          <div key={path} className="page-enter">
-            {children}
-          </div>
+          <ErrorBoundary resetKey={path}>
+            <div key={path} className="page-enter">
+              {children}
+            </div>
+          </ErrorBoundary>
         </main>
 
         <footer className="mx-auto w-full max-w-[1360px] px-4 pb-10 text-[11px] leading-relaxed text-apple-subtext sm:px-6 lg:px-8">
-          Kex Labs · 实验中的视频工作台（设计态）。页面数字全部读取自 acceptance 仓库真实产物（plan / jobs / status /
-          system / deliveries），不含模拟数据。
+          Kex Labs · 视频工作台 · 剧本生成视频与 AI 视频美化双轨制片平台
         </footer>
       </div>
 
-      <MobileDrawer open={drawerOpen} onClose={closeDrawer} system={system} />
+      <MobileDrawer
+        open={drawerOpen}
+        onClose={closeDrawer}
+        system={system}
+        onOpenPalette={() => setPaletteOpen(true)}
+        restoreFocusRef={menuRef}
+      />
+
+      <QuickRoutePalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   )
 }

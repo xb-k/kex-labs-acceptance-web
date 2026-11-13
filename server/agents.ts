@@ -922,8 +922,11 @@ function seedRoute(ctx: AgentsContext, req: IncomingMessage, res: ServerResponse
       active: true,
       active_version: 1,
       source: {
-        kind: 'local',
-        url: null,
+        kind:
+          entry.source?.kind === 'import' || entry.source?.kind === 'edit' || entry.source?.kind === 'local'
+            ? entry.source.kind
+            : 'local',
+        url: typeof entry.source?.url === 'string' ? entry.source.url : null,
         repo: typeof entry.source?.repo === 'string' ? entry.source.repo : null,
         commit: typeof entry.source?.commit === 'string' ? entry.source.commit : null,
         license: typeof entry.source?.license === 'string' ? entry.source.license : 'internal',

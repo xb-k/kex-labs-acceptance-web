@@ -1,15 +1,22 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { JobsResponse, StudioJobsResponse } from '../types'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { GateStatus, JobsResponse, StudioJobsResponse, StudioJobStatus } from '../types'
 import { useJson, useLiveJson } from '../api'
 import { Link } from '../router'
 import { StatusChip } from '../components/StatusChip'
 import { StudioStatusChip } from '../components/StudioStatusChip'
 import { SnapshotStatusStage } from '../components/SnapshotStatusStage'
-import { ChevronRight, Clapper, Film } from '../components/icons'
-import { formatResolution } from '../format'
+import { ChevronRight, Clapper, Film, Refresh } from '../components/icons'
+import { formatResolution, formatStamp } from '../format'
 import { jobIdShort, jobReadable, matchesJobQuery } from '../job-label'
+import { readSearchParam, updateSearchParams } from '../url'
+import { SelectMenu } from '../components/SelectMenu'
+import { FilterChipGroup } from '../components/ui'
+import { useInfiniteScrollBatch } from '../hooks'
 
 type JobsTab = 'b' | 'studio'
+type BVerdictFilter = 'all' | 'PASS' | 'FAIL' | 'CONDITIONAL'
+type StudioStatusFilter = 'all' | StudioJobStatus
+type SortMode = 'default' | 'status' | 'recent'
 
 const TABS: Array<{ key: JobsTab; label: string }> = [
   { key: 'b', label: 'B 轨产物' },
@@ -18,66 +25,127 @@ const TABS: Array<{ key: JobsTab; label: string }> = [
 
 /** 读 `?tab=studio`；缺失、`tab=b` 或非法值都归一为 B 轨。 */
 function readTab(): { tab: JobsTab; dirty: boolean } {
-  const raw = new URLSearchParams(window.location.search).get('tab')
+  const raw = readSearchParam('tab')
   const tab: JobsTab = raw === 'studio' ? 'studio' : 'b'
   return { tab, dirty: raw !== null && raw !== 'studio' }
 }
 
 function writeTab(tab: JobsTab, mode: 'push' | 'replace') {
-  const url = new URL(window.location.href)
-  if (tab === 'studio') url.searchParams.set('tab', 'studio')
-  else url.searchParams.delete('tab')
-  const target = `${url.pathname}${url.search}${url.hash}`
-  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`
-  if (target === current) return
-  window.history[mode === 'push' ? 'pushState' : 'replaceState'](
-    { ...(window.history.state ?? {}) },
-    '',
-    target
-  )
+  updateSearchParams({ tab: tab === 'studio' ? 'studio' : null }, mode)
 }
 
-function pad(value: number): string {
-  return String(value).padStart(2, '0')
+const VERDICT_RANK: Record<GateStatus, number> = {
+  FAIL: 0,
+  CONDITIONAL: 1,
+  UNKNOWN: 2,
+  PASS: 3
 }
 
-function formatStamp(value: string | null | undefined): string {
-  if (!value) return '无数据'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
-    date.getMinutes()
-  )}`
+const STUDIO_STATUS_RANK: Record<StudioJobStatus, number> = {
+  failed: 0,
+  running: 1,
+  queued: 2,
+  succeeded: 3,
+  canceled: 4
 }
 
 /** 创作工坊 tab：只在挂载时轮询；切回 B 轨即卸载并停止请求。 */
 function StudioJobsTab({ query }: { query: string }) {
-  const { status, data, error, retry, refresh } = useLiveJson<StudioJobsResponse>(
+  const { status, data, error, refreshing, retry, refresh } = useLiveJson<StudioJobsResponse>(
     '/api/studio/jobs?limit=50',
     4000
   )
+  const [statusFilter, setStatusFilter] = useState<StudioStatusFilter>('all')
+  const [sortMode, setSortMode] = useState<SortMode>('default')
+
   const items = data?.items ?? []
-  const visibleItems = items.filter((job) => matchesJobQuery(job, query))
+
+  const visibleItems = useMemo(() => {
+    const filtered = items.filter((job) => {
+      if (statusFilter !== 'all' && job.status !== statusFilter) return false
+      return matchesJobQuery(job, query)
+    })
+    if (sortMode === 'status') {
+      return [...filtered].sort((a, b) => STUDIO_STATUS_RANK[a.status] - STUDIO_STATUS_RANK[b.status])
+    }
+    if (sortMode === 'recent') {
+      return [...filtered].sort((a, b) => Date.parse(b.updated_at || b.created_at) - Date.parse(a.updated_at || a.created_at))
+    }
+    return filtered
+  }, [items, query, statusFilter, sortMode])
+
+  const batch = useInfiniteScrollBatch(
+    visibleItems.length,
+    15,
+    15,
+    `${query}|${statusFilter}|${sortMode}`
+  )
+  const pagedItems = visibleItems.slice(0, batch.visibleCount)
+
   const count = data ? Math.max(data.count, items.length) : null
 
+  const statusCounts = useMemo(
+    () => ({
+      all: items.length,
+      queued: items.filter((j) => j.status === 'queued').length,
+      running: items.filter((j) => j.status === 'running').length,
+      succeeded: items.filter((j) => j.status === 'succeeded').length,
+      failed: items.filter((j) => j.status === 'failed').length,
+      canceled: items.filter((j) => j.status === 'canceled').length
+    }),
+    [items]
+  )
+
   return (
-    <div className="mt-6">
+    <div className="mt-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs leading-relaxed text-apple-subtext">
-          {count == null
-            ? '读取中…'
-            : query.trim()
-              ? `共 ${count} 个 · 筛选后 ${visibleItems.length} 个`
-              : `共 ${count} 个`}
-        </p>
-        <button
-          type="button"
-          onClick={refresh}
-          className="rounded-lg px-2 py-1 text-xs font-medium text-apple-subtext transition-colors hover:bg-black/[0.04] hover:text-apple-text focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
-        >
-          刷新
-        </button>
+        <FilterChipGroup<StudioStatusFilter>
+          label="按运行状态筛选"
+          value={statusFilter}
+          onChange={setStatusFilter}
+          options={[
+            { key: 'all', label: '全部', count: statusCounts.all },
+            { key: 'running', label: '运行中', count: statusCounts.running },
+            { key: 'queued', label: '排队', count: statusCounts.queued },
+            { key: 'succeeded', label: '成功', count: statusCounts.succeeded },
+            { key: 'failed', label: '失败', count: statusCounts.failed }
+          ]}
+        />
+
+        <div className="flex items-center gap-2">
+          <div className="w-[136px]">
+            <SelectMenu
+              value={sortMode}
+              onChange={(val) => setSortMode(val as SortMode)}
+              ariaLabel="排序方式"
+              align="right"
+              size="sm"
+              options={[
+                { value: 'default', label: '默认排序' },
+                { value: 'recent', label: '最近更新优先' },
+                { value: 'status', label: '异常/运行优先' }
+              ]}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            disabled={refreshing}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-black/[0.08] bg-white px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-black/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 disabled:opacity-60"
+          >
+            <Refresh className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            刷新
+          </button>
+        </div>
       </div>
+
+      <p className="mt-2.5 text-xs leading-relaxed text-apple-subtext">
+        {count == null
+          ? '读取中…'
+          : query.trim() || statusFilter !== 'all'
+            ? `共 ${count} 个 · 当前显示 ${visibleItems.length} 个`
+            : `共 ${count} 个`}
+      </p>
 
       {error && data && (
         <div
@@ -87,7 +155,7 @@ function StudioJobsTab({ query }: { query: string }) {
           <span className="min-w-0 break-words">刷新失败：{error}（显示上次读取的数据）</span>
           <button
             type="button"
-            onClick={refresh}
+            onClick={() => void refresh()}
             className="shrink-0 underline underline-offset-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
           >
             重试
@@ -119,7 +187,7 @@ function StudioJobsTab({ query }: { query: string }) {
           </div>
           <button
             type="button"
-            onClick={retry}
+            onClick={() => void retry()}
             className="shrink-0 rounded-lg bg-apple-text px-3 py-1.5 text-xs font-medium text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
           >
             重试
@@ -150,76 +218,169 @@ function StudioJobsTab({ query }: { query: string }) {
         <div className="card mt-3 p-6" role="status">
           <h2 className="text-sm font-medium">没有匹配的任务</h2>
           <p className="mt-2 text-sm text-apple-subtext">
-            当前筛选「{query.trim()}」没有命中任务 ID、标题或页面上的文字，清空筛选可看全部。
+            当前筛选条件下没有命中任务，切换状态或清空关键词可查看全部。
           </p>
         </div>
       )}
 
       {status === 'ready' && data && visibleItems.length > 0 && (
-        <div className="card mt-3 overflow-hidden p-0">
-          <ul className="min-w-0 divide-y divide-black/[0.06]">
-            {visibleItems.map((job) => (
-              <li key={job.id}>
-                <Link
-                  to={`/studio?job=${encodeURIComponent(job.id)}`}
-                  className="flex min-w-0 items-center gap-3 px-4 py-3 transition-colors hover:bg-black/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-apple-blue/50"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                      <span
-                        className="min-w-0 flex-1 truncate text-[13px] font-medium"
-                        title={`${jobReadable(job)}（任务 ID ${job.id}）`}
-                      >
-                        {jobReadable(job)}
-                      </span>
-                      <span className="shrink-0 rounded-md bg-black/[0.03] px-1.5 py-0.5 text-[11px] font-medium text-apple-subtextAlt">
-                        {job.rail} 轨
-                      </span>
-                      <span data-testid={`snapshot-status-${job.id}`} data-snapshot-status={job.status}>
-                        <StudioStatusChip status={job.status} />
-                      </span>
+        <>
+          <div className="card mt-3 overflow-hidden p-0">
+            <ul className="min-w-0 divide-y divide-black/[0.06]">
+              {pagedItems.map((job) => (
+                <li key={job.id}>
+                  <Link
+                    to={`/studio?job=${encodeURIComponent(job.id)}`}
+                    className="flex min-w-0 items-center gap-3 px-4 py-3 transition-colors hover:bg-black/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-apple-blue/50"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                        <span
+                          className="min-w-0 flex-1 truncate text-[13px] font-medium"
+                          title={`${jobReadable(job)}（任务 ID ${job.id}）`}
+                        >
+                          {jobReadable(job)}
+                        </span>
+                        <span className="shrink-0 text-[11px] font-medium text-apple-blueInk">
+                          {job.rail} 轨
+                        </span>
+                        <span data-testid={`snapshot-status-${job.id}`} data-snapshot-status={job.status}>
+                          <StudioStatusChip status={job.status} />
+                        </span>
+                      </div>
+                      <p className="mt-1 truncate text-[11px] leading-relaxed text-apple-subtext">
+                        <span className="num" title={job.id}>
+                          {jobIdShort(job.id)}
+                        </span>{' '}
+                        · {formatStamp(job.created_at)} · Brief{' '}
+                        <span className="num">{job.brief_id ?? '—'}</span>
+                        {' · '}
+                        <span
+                          data-testid={`snapshot-stage-${job.id}`}
+                          data-snapshot-stage={job.stage ?? ''}
+                          title={job.stage ? `阶段 ${job.stage}` : '阶段不可用：studio 未返回 stage'}
+                        >
+                          {job.stage ? `阶段 ${job.stage}` : '阶段 —'}
+                        </span>
+                        {job.error ? ` · ${job.error}` : ''}
+                      </p>
                     </div>
-                    <p className="mt-1 truncate text-[11px] leading-relaxed text-apple-subtext">
-                      <span className="num" title={job.id}>
-                        {jobIdShort(job.id)}
-                      </span>{' '}
-                      · {formatStamp(job.created_at)} · Brief{' '}
-                      <span className="num">{job.brief_id ?? '—'}</span>
-                      {' · '}
-                      <span
-                        data-testid={`snapshot-stage-${job.id}`}
-                        data-snapshot-stage={job.stage ?? ''}
-                        title={job.stage ? `阶段 ${job.stage}` : '阶段不可用：studio 未返回 stage'}
-                      >
-                        {job.stage ? `阶段 ${job.stage}` : '阶段 —'}
-                      </span>
-                      {job.error ? ` · ${job.error}` : ''}
-                    </p>
-                  </div>
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-apple-subtext" aria-hidden="true" />
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </div>
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-apple-subtext" aria-hidden="true" />
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div
+            ref={batch.sentinelRef}
+            data-testid="studio-jobs-lazy-sentinel"
+            className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-apple-subtext"
+          >
+            <span className="num">
+              已加载 {pagedItems.length} / {visibleItems.length} 个工坊任务
+              {batch.hasMore ? ' · 向下滚动自动懒加载' : ' · 已全部加载'}
+            </span>
+            {batch.hasMore && (
+              <button
+                type="button"
+                onClick={batch.loadMore}
+                className="rounded-lg border border-black/[0.08] bg-white px-2.5 py-1 text-xs font-medium text-apple-text transition-colors hover:bg-black/[0.03]"
+              >
+                加载更多
+              </button>
+            )}
+          </div>
+        </>
       )}
     </div>
   )
 }
 
 function BTrackTab({ query }: { query: string }) {
-  const { status, data, error, retry } = useJson<JobsResponse>('/api/jobs')
+  const { status, data, error, refreshing, retry, refresh } = useJson<JobsResponse>('/api/jobs')
+  const [verdictFilter, setVerdictFilter] = useState<BVerdictFilter>('all')
+  const [sortMode, setSortMode] = useState<'default' | 'verdict' | 'pass_rate'>('default')
+
   const jobs = data?.jobs ?? []
-  const visibleJobs = jobs.filter((job) => matchesJobQuery(job, query))
+
+  const visibleJobs = useMemo(() => {
+    const filtered = jobs.filter((job) => {
+      if (verdictFilter !== 'all' && job.verdict !== verdictFilter) return false
+      return matchesJobQuery(job, query)
+    })
+    if (sortMode === 'verdict') {
+      return [...filtered].sort((a, b) => VERDICT_RANK[a.verdict ?? 'UNKNOWN'] - VERDICT_RANK[b.verdict ?? 'UNKNOWN'])
+    }
+    if (sortMode === 'pass_rate') {
+      const rate = (j: (typeof jobs)[number]) => (j.judged > 0 ? j.passed / j.judged : -1)
+      return [...filtered].sort((a, b) => rate(a) - rate(b))
+    }
+    return filtered
+  }, [jobs, query, verdictFilter, sortMode])
+
+  const batch = useInfiniteScrollBatch(
+    visibleJobs.length,
+    10,
+    10,
+    `${query}|${verdictFilter}|${sortMode}`
+  )
+  const pagedJobs = visibleJobs.slice(0, batch.visibleCount)
+
+  const counts = useMemo(
+    () => ({
+      all: jobs.length,
+      PASS: jobs.filter((j) => j.verdict === 'PASS').length,
+      CONDITIONAL: jobs.filter((j) => j.verdict === 'CONDITIONAL').length,
+      FAIL: jobs.filter((j) => j.verdict === 'FAIL').length
+    }),
+    [jobs]
+  )
 
   return (
-    <div className="mt-6">
+    <div className="mt-5">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <FilterChipGroup<BVerdictFilter>
+          label="按门禁结果筛选"
+          value={verdictFilter}
+          onChange={setVerdictFilter}
+          options={[
+            { key: 'all', label: '全部', count: counts.all },
+            { key: 'PASS', label: 'PASS', count: counts.PASS },
+            { key: 'CONDITIONAL', label: '有条件', count: counts.CONDITIONAL },
+            { key: 'FAIL', label: 'FAIL', count: counts.FAIL }
+          ]}
+        />
+        <div className="flex items-center gap-2">
+          <div className="w-[136px]">
+            <SelectMenu
+              value={sortMode}
+              onChange={(val) => setSortMode(val as 'default' | 'verdict' | 'pass_rate')}
+              ariaLabel="排序方式"
+              align="right"
+              size="sm"
+              options={[
+                { value: 'default', label: '默认排序' },
+                { value: 'verdict', label: '未通过优先' },
+                { value: 'pass_rate', label: '通过率低优先' }
+              ]}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={refreshing}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-black/[0.08] bg-white px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-black/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 disabled:opacity-60"
+          >
+            <Refresh className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            刷新
+          </button>
+        </div>
+      </div>
+
       {data && (
         <p className="mb-3 text-xs leading-relaxed text-apple-subtext">
-          共 {jobs.length} 个任务 ·{' '}
-          {jobs.filter((j) => j.verdict === 'FAIL').length} 个 FAIL ·{' '}
-          {jobs.filter((j) => j.verdict === 'CONDITIONAL').length} 个有条件 PASS
-          {query.trim() ? ` · 筛选后 ${visibleJobs.length} 个` : ''}
+          共 {jobs.length} 个任务 · {counts.FAIL} 个 FAIL · {counts.CONDITIONAL} 个有条件 PASS
+          {query.trim() || verdictFilter !== 'all' ? ` · 筛选后 ${visibleJobs.length} 个` : ''}
         </p>
       )}
 
@@ -254,11 +415,24 @@ function BTrackTab({ query }: { query: string }) {
 
       {status === 'ready' && jobs.length === 0 && (
         <div className="card p-6">
-          <h2 className="text-sm font-medium">还没有可展示的任务</h2>
+          <h2 className="text-sm font-medium">还没有 B 轨评测任务</h2>
           <p className="mt-2 max-w-[60ch] text-sm leading-relaxed text-apple-subtext">
-            在 acceptance 下新建 <span className="num">issue-19/b-track-s&lt;编号&gt;/</span>，放入 summary JSON、report.md
-            和 out/*.mp4 后刷新。字段约定见 web/README.md。
+            可前往创作工坊提交剧本生图任务或上传视频进行 AI 拆画与美化调色，产出结果将自动进入质量评测队列。
           </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link
+              to="/studio?rail=a"
+              className="inline-flex items-center gap-1 rounded-lg bg-apple-text px-3 py-1.5 text-xs font-medium text-white"
+            >
+              进入轨道 A · 剧本生图
+            </Link>
+            <Link
+              to="/studio?rail=b"
+              className="inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-3 py-1.5 text-xs font-medium text-apple-text hover:bg-[#FAFAFB]"
+            >
+              进入轨道 B · 上传视频美化
+            </Link>
+          </div>
         </div>
       )}
 
@@ -266,86 +440,113 @@ function BTrackTab({ query }: { query: string }) {
         <div className="card p-6" role="status">
           <h2 className="text-sm font-medium">没有匹配的任务</h2>
           <p className="mt-2 text-sm text-apple-subtext">
-            当前筛选「{query.trim()}」没有命中任务 ID、标题或页面上的文字，清空筛选可看全部。
+            当前筛选条件下没有命中任务，切换状态或清空关键词可查看全部。
           </p>
         </div>
       )}
 
       {status === 'ready' && visibleJobs.length > 0 && (
-        <div className="grid gap-4 md:grid-cols-2" data-equal-grid>
-          {visibleJobs.map((job) => (
-            <Link
-              key={job.id}
-              to={`/job/${job.id}`}
-              className="card group block min-w-0 p-4 transition-shadow hover:shadow-lift focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 sm:p-5"
-            >
-              <div className="flex gap-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-md bg-[#F0F6FF] px-1.5 py-0.5 text-xs font-medium text-apple-blueInk">
-                      {job.track} 轨
-                    </span>
-                    <span className="num truncate text-[11px] text-apple-subtext" title={job.id}>
-                      {jobIdShort(job.id)}
+        <>
+          <div className="grid gap-4 md:grid-cols-2" data-equal-grid>
+            {pagedJobs.map((job) => (
+              <Link
+                key={job.id}
+                to={`/job/${job.id}`}
+                className="card group block min-w-0 p-4 transition-shadow hover:shadow-lift focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 sm:p-5"
+              >
+                <div className="flex gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-semibold text-apple-blueInk">
+                        {job.track} 轨
+                      </span>
+                      <span className="num truncate text-[11px] text-apple-subtext" title={job.id}>
+                        {jobIdShort(job.id)}
+                      </span>
+                    </div>
+
+                    <h2
+                      className="mt-2 truncate text-[15px] font-semibold leading-snug"
+                      title={`${jobReadable(job)}（任务 ID ${job.id}）`}
+                    >
+                      {jobReadable(job)}
+                    </h2>
+
+                    <p className="mt-1.5 text-xs leading-relaxed text-apple-subtext">
+                      {formatResolution(job.width, job.height)} ·{' '}
+                      {job.fps ? `${job.fps}fps` : '无数据'} · {job.frames ?? '—'} 帧
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <StatusChip status={job.verdict ?? 'UNKNOWN'} label={job.statusLabel} />
+                      <SnapshotStatusStage source="b-track" jobId={job.id} className="text-apple-subtext" />
+                      <span className="text-xs text-apple-subtext">
+                        {job.verdict === 'CONDITIONAL'
+                          ? `${job.passed}/${job.judged} 项明确通过 · ${job.total - job.judged} 项仅报数`
+                          : `${job.passed}/${job.judged} 判据通过`}
+                      </span>
+                    </div>
+
+                    <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-apple-subtext">{job.statusNote}</p>
+
+                    <span className="mt-3 inline-flex items-center gap-0.5 text-xs font-medium text-apple-blue">
+                      查看详情
+                      <ChevronRight className="h-3.5 w-3.5" />
                     </span>
                   </div>
 
-                  <h2
-                    className="mt-2 truncate text-[15px] font-semibold leading-snug"
-                    title={`${jobReadable(job)}（任务 ID ${job.id}）`}
-                  >
-                    {jobReadable(job)}
-                  </h2>
-
-                  <p className="mt-1.5 text-xs leading-relaxed text-apple-subtext">
-                    {formatResolution(job.width, job.height)} ·{' '}
-                    {job.fps ? `${job.fps}fps` : '无数据'} · {job.frames ?? '—'} 帧
-                  </p>
-
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <StatusChip status={job.verdict ?? 'UNKNOWN'} label={job.statusLabel} />
-                    <SnapshotStatusStage source="b-track" jobId={job.id} className="text-apple-subtext" />
-                    <span className="text-xs text-apple-subtext">
-                      {job.verdict === 'CONDITIONAL'
-                        ? `${job.passed}/${job.judged} 项明确通过 · ${job.total - job.judged} 项仅报数`
-                        : `${job.passed}/${job.judged} 判据通过`}
-                    </span>
+                  <div className="relative aspect-[9/16] w-[76px] shrink-0 overflow-hidden rounded-lg bg-[#0B0B0C] sm:w-[84px]">
+                    {job.media.poster ? (
+                      <img
+                        src={job.media.poster}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        className="h-full w-full object-cover"
+                      />
+                    ) : job.media.output ? (
+                      <video
+                        src={job.media.output}
+                        muted
+                        playsInline
+                        preload="metadata"
+                        aria-hidden="true"
+                        tabIndex={-1}
+                        onLoadedMetadata={(event) => {
+                          event.currentTarget.currentTime = Math.min(0.4, (event.currentTarget.duration || 0) / 3)
+                        }}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <span className="grid h-full w-full place-items-center text-white/40">
+                        <Film className="h-5 w-5" />
+                      </span>
+                    )}
                   </div>
-
-                  <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-apple-subtext">{job.statusNote}</p>
-
-                  <span className="mt-3 inline-flex items-center gap-0.5 text-xs font-medium text-apple-blue">
-                    查看详情
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  </span>
                 </div>
-
-                <div className="relative aspect-[9/16] w-[76px] shrink-0 overflow-hidden rounded-lg bg-[#0B0B0C] sm:w-[84px]">
-                  {job.media.poster ? (
-                    <img src={job.media.poster} alt="" className="h-full w-full object-cover" />
-                  ) : job.media.output ? (
-                    <video
-                      src={job.media.output}
-                      muted
-                      playsInline
-                      preload="metadata"
-                      aria-hidden="true"
-                      tabIndex={-1}
-                      onLoadedMetadata={(event) => {
-                        event.currentTarget.currentTime = Math.min(0.4, (event.currentTarget.duration || 0) / 3)
-                      }}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <span className="grid h-full w-full place-items-center text-white/40">
-                      <Film className="h-5 w-5" />
-                    </span>
-                  )}
-                </div>
-              </div>
-            </Link>
-          ))}
-        </div>
+              </Link>
+            ))}
+          </div>
+          <div
+            ref={batch.sentinelRef}
+            data-testid="b-jobs-lazy-sentinel"
+            className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-black/[0.06] pt-3 text-xs text-apple-subtext"
+          >
+            <span className="num">
+              已加载 {pagedJobs.length} / {visibleJobs.length} 个任务
+              {batch.hasMore ? ' · 向下滚动自动懒加载' : ' · 已全部加载'}
+            </span>
+            {batch.hasMore && (
+              <button
+                type="button"
+                onClick={batch.loadMore}
+                className="rounded-lg border border-black/[0.08] bg-white px-2.5 py-1 text-xs font-medium text-apple-text transition-colors hover:bg-black/[0.03]"
+              >
+                加载更多
+              </button>
+            )}
+          </div>
+        </>
       )}
 
       {data && (
@@ -365,7 +566,7 @@ function BTrackTab({ query }: { query: string }) {
 
 export function JobsPage() {
   const [tab, setTab] = useState<JobsTab>(() => readTab().tab)
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useState(() => readSearchParam('q') ?? '')
 
   // 直接打开 / popstate：URL 决定 tab，非法值就地归一化（replaceState）。
   useEffect(() => {
@@ -373,6 +574,7 @@ export function JobsPage() {
       const next = readTab()
       if (next.dirty) writeTab(next.tab, 'replace')
       setTab(next.tab)
+      setQuery(readSearchParam('q') ?? '')
     }
     apply()
     window.addEventListener('popstate', apply)
@@ -388,6 +590,11 @@ export function JobsPage() {
     [tab]
   )
 
+  const handleQueryChange = (val: string) => {
+    setQuery(val)
+    updateSearchParams({ q: val.trim() || null }, 'replace')
+  }
+
   return (
     <div>
       <div className="max-w-[64ch]">
@@ -401,7 +608,7 @@ export function JobsPage() {
       <div
         role="tablist"
         aria-label="任务中心视图"
-        className="mt-5 inline-flex items-center gap-0.5 rounded-full bg-black/[0.04] p-0.5"
+        className="mt-5 inline-flex items-center gap-0.5 rounded-[10px] bg-black/[0.04] p-1"
       >
         {TABS.map((entry) => {
           const active = tab === entry.key
@@ -412,7 +619,7 @@ export function JobsPage() {
               role="tab"
               aria-selected={active}
               onClick={() => select(entry.key)}
-              className={`inline-flex h-8 items-center rounded-full px-3 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 ${
+              className={`inline-flex h-8 items-center rounded-[8px] px-3 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 ${
                 active ? 'bg-white text-apple-text shadow-soft' : 'text-apple-subtext hover:text-apple-text'
               }`}
             >
@@ -426,7 +633,10 @@ export function JobsPage() {
         <input
           type="search"
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => handleQueryChange(event.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape' && query) handleQueryChange('')
+          }}
           aria-label="按任务 ID、标题或页面上的文字筛选"
           placeholder="按任务 ID、标题或页面上的文字筛选，如 3ef5f3 / 工具链 / 有条件"
           className="h-9 w-full max-w-[420px] rounded-lg border border-black/[0.08] bg-white px-3 text-xs text-apple-text shadow-soft outline-none transition-colors placeholder:text-apple-subtext focus:border-apple-blue focus:ring-2 focus:ring-apple-blue/20"
@@ -434,7 +644,7 @@ export function JobsPage() {
         {query.trim() && (
           <button
             type="button"
-            onClick={() => setQuery('')}
+            onClick={() => handleQueryChange('')}
             className="h-9 rounded-lg px-2.5 text-xs font-medium text-apple-subtext transition-colors hover:bg-black/[0.04] hover:text-apple-text focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
           >
             清空筛选

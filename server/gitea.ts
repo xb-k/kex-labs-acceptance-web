@@ -258,6 +258,226 @@ async function requestJson(pathAndQuery: string, init: RequestInit = {}): Promis
   return { data, total }
 }
 
+/**
+ * Fetch a text file (e.g. `prompts/script-templates.json` or `.md`) from a configured
+ * Gitea repository via the Gitea Contents API (falling back cleanly to raw endpoint).
+ */
+export async function fetchGiteaRepoFile(opts: {
+  repo?: string
+  ref?: string
+  filePath: string
+  fetchImpl?: typeof fetch
+}): Promise<{ content: string; repo: string; ref: string; filePath: string; htmlUrl: string | null }> {
+  const cfg = giteaConfig()
+  const targetRepo = (opts.repo ?? cfg.repo).trim().replace(/^\/+|\/+$/g, '')
+  const targetRef = (opts.ref ?? 'main').trim() || 'main'
+  const cleanPath = opts.filePath.trim().replace(/^\/+/, '')
+  if (!cfg.url || !targetRepo || !cleanPath) {
+    throw new GiteaError('not configured')
+  }
+
+  const auth = authHeader()
+  const encodedPath = cleanPath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')
+  const apiUrl = `${cfg.url}/api/v1/repos/${targetRepo}/contents/${encodedPath}?ref=${encodeURIComponent(targetRef)}`
+  const fetcher = opts.fetchImpl ?? fetch
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  let response: Response
+  try {
+    response = await fetcher(apiUrl, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        ...(auth ? { Authorization: auth } : {})
+      }
+    })
+  } catch {
+    throw new GiteaError('unavailable')
+  } finally {
+    clearTimeout(timer)
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    throw new GiteaError('auth failed', response.status)
+  }
+  if (!response.ok) {
+    throw new GiteaError('upstream error', response.status)
+  }
+
+  const rawText = await response.text()
+  try {
+    const parsed = JSON.parse(rawText) as {
+      content?: unknown
+      encoding?: unknown
+      html_url?: unknown
+    }
+    if (parsed && typeof parsed === 'object' && typeof parsed.content === 'string') {
+      const decoded =
+        parsed.encoding === 'base64'
+          ? Buffer.from(parsed.content.replace(/\s+/g, ''), 'base64').toString('utf8')
+          : parsed.content
+      return {
+        content: decoded,
+        repo: targetRepo,
+        ref: targetRef,
+        filePath: cleanPath,
+        htmlUrl: typeof parsed.html_url === 'string' ? publicUrl(parsed.html_url) : null
+      }
+    }
+  } catch {
+    // plain text / raw response
+  }
+
+  return {
+    content: rawText,
+    repo: targetRepo,
+    ref: targetRef,
+    filePath: cleanPath,
+    htmlUrl: `${cfg.webUrl}/${targetRepo}/src/branch/${encodeURIComponent(targetRef)}/${encodedPath}`
+  }
+}
+
+export type GiteaPromptCandidate = {
+  repo: string
+  branch: string
+  filePath: string
+  score: number
+  htmlUrl: string
+}
+
+export type GiteaDiscoveryResult = {
+  scannedRepos: string[]
+  candidates: GiteaPromptCandidate[]
+}
+
+const PROMPT_PATH_RE = /(prompt|template|script|director|storyboard|skill|novel|kb)/i
+const PROMPT_EXT_RE = /\.(json|ya?ml|md|markdown)$/i
+
+function scorePromptCandidatePath(filePath: string): number {
+  const lower = filePath.toLowerCase()
+  if (!PROMPT_EXT_RE.test(lower)) return 0
+  let score = 0
+  if (lower.includes('script-template') || lower.includes('script_template')) score += 10
+  if (lower.startsWith('prompts/') || lower.includes('/prompts/')) score += 6
+  if (lower.startsWith('templates/') || lower.includes('/templates/')) score += 5
+  if (lower.startsWith('skills/') || lower.includes('/skills/')) score += 4
+  if (PROMPT_PATH_RE.test(lower)) score += 3
+  if (lower.endsWith('.json')) score += 2
+  return score
+}
+
+/**
+ * Agent autonomous discovery across Gitea repositories:
+ * searches accessible repos (plus configured default/preferred repo), reads each repo's
+ * git tree, and locates candidate prompt/template definition files automatically.
+ */
+export async function discoverGiteaPromptFiles(opts: {
+  preferredRepo?: string
+  preferredBranch?: string
+  fetchImpl?: typeof fetch
+} = {}): Promise<GiteaDiscoveryResult> {
+  const cfg = giteaConfig()
+  if (!cfg.url) throw new GiteaError('not configured')
+  const fetcher = opts.fetchImpl ?? fetch
+  const auth = authHeader()
+
+  const fetchGiteaJson = async (pathAndQuery: string): Promise<unknown> => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+    try {
+      const res = await fetcher(`${cfg.url}${pathAndQuery}`, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          ...(auth ? { Authorization: auth } : {})
+        }
+      })
+      if (res.status === 401 || res.status === 403) throw new GiteaError('auth failed', res.status)
+      if (!res.ok) throw new GiteaError('upstream error', res.status)
+      return await res.json()
+    } catch (err) {
+      if (err instanceof GiteaError) throw err
+      throw new GiteaError('unavailable')
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  const repoBranches = new Map<string, string>()
+  const preferred = (opts.preferredRepo ?? '').trim().replace(/^\/+|\/+$/g, '')
+  if (preferred) {
+    repoBranches.set(preferred, (opts.preferredBranch ?? 'main').trim() || 'main')
+  } else if (cfg.repo) {
+    repoBranches.set(cfg.repo, 'main')
+  }
+
+  // Search Gitea accessible repos so the Agent discovers across the workspace automatically
+  try {
+    const searchData = await fetchGiteaJson('/api/v1/repos/search?limit=15&sort=updated')
+    const list = Array.isArray(searchData)
+      ? searchData
+      : searchData && typeof searchData === 'object' && Array.isArray((searchData as { data?: unknown }).data)
+        ? (searchData as { data: unknown[] }).data
+        : []
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue
+      const rec = item as { full_name?: unknown; default_branch?: unknown }
+      const fullName = typeof rec.full_name === 'string' ? rec.full_name.trim() : ''
+      if (!fullName) continue
+      const defBranch =
+        typeof rec.default_branch === 'string' && rec.default_branch.trim()
+          ? rec.default_branch.trim()
+          : 'main'
+      if (!repoBranches.has(fullName)) {
+        repoBranches.set(fullName, defBranch)
+      }
+    }
+  } catch (err) {
+    // If search fails only because of auth/network and we have no fallback repo metadata, propagate
+    if (repoBranches.size === 0) throw err
+  }
+
+  const scannedRepos: string[] = []
+  const candidates: GiteaPromptCandidate[] = []
+
+  for (const [repo, branch] of repoBranches.entries()) {
+    scannedRepos.push(repo)
+    try {
+      const treeData = await fetchGiteaJson(
+        `/api/v1/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`
+      )
+      const treeEntries =
+        treeData && typeof treeData === 'object' && Array.isArray((treeData as { tree?: unknown }).tree)
+          ? (treeData as { tree: Array<{ path?: unknown; type?: unknown }> }).tree
+          : []
+      for (const entry of treeEntries) {
+        if (!entry || entry.type !== 'blob' || typeof entry.path !== 'string') continue
+        const score = scorePromptCandidatePath(entry.path)
+        if (score <= 0) continue
+        const encodedPath = entry.path
+          .split('/')
+          .map((seg) => encodeURIComponent(seg))
+          .join('/')
+        candidates.push({
+          repo,
+          branch,
+          filePath: entry.path,
+          score,
+          htmlUrl: `${cfg.webUrl}/${repo}/src/branch/${encodeURIComponent(branch)}/${encodedPath}`
+        })
+      }
+    } catch {
+      // Keep scanning remaining repos; fallback file probing runs downstream if needed
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score)
+  return { scannedRepos, candidates: candidates.slice(0, 12) }
+}
+
 function issuesPath(state: GiteaIssueState, limit: number, page: number): string {
   const { repo } = giteaConfig()
   const params = new URLSearchParams({

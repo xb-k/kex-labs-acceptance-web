@@ -1148,3 +1148,220 @@ export type AgentImportInput = {
   commit?: string
   id?: string
 }
+
+export type VideoTemplateId =
+  | 'marketing'
+  | 'documentary'
+  | 'narrative'
+  | 'historical_novel'
+  | 'vlog'
+  | 'product_demo'
+  | 'scenic_essay'
+
+export type ScriptPromptTemplateInfo = {
+  id: VideoTemplateId
+  category: string
+  label: string
+  englishName: string
+  githubStandard: string
+  sourceUrl?: string
+  summary: string
+  structureBeats: string
+  opticalSpec: string
+  recommendedProfile: 'ad_teal_orange' | 'vlog_warm_film' | 'doc_neutral' | 'landscape_low_sat'
+  recommendedDurationS: 10 | 15 | 20 | 30 | 45 | 60
+  recommendedAspect: '16:9' | '9:16' | '1:1' | '4:5'
+  supportsNovelSeries?: boolean
+  systemDirectives: string
+}
+
+export type UpstreamGithubSource = {
+  id: string
+  repo: string
+  branch: string
+  url: string
+  license: string
+  role: string
+  status: 'synced' | 'fallback' | 'pending'
+  checkedAt: string | null
+  etag?: string | null
+}
+
+export type GiteaDiscoveredLocation = {
+  repo: string
+  branch: string
+  filePath: string
+  matchedTemplates: number
+  htmlUrl?: string | null
+}
+
+export type GiteaTemplateSource = {
+  enabled: boolean
+  repo: string
+  branch: string
+  filePath: string
+  configured: boolean
+  lastSyncedAt: string | null
+  status: 'idle' | 'synced' | 'fallback' | 'error'
+  message: string
+  htmlUrl?: string | null
+  agentName?: string
+  scannedRepos?: string[]
+  discoveredLocations?: GiteaDiscoveredLocation[]
+}
+
+export type TemplateSyncState = {
+  autoSyncEnabled: boolean
+  intervalHours: 6 | 12 | 24 | 72
+  lastSyncedAt: string | null
+  lastSyncMode: 'manual' | 'scheduled' | 'initial'
+  syncStatus: 'idle' | 'synced' | 'partial'
+  lastResultMessage: string
+  sources: UpstreamGithubSource[]
+  giteaSource?: GiteaTemplateSource
+}
+
+export type HistoricalLookupResponse = {
+  ok: boolean
+  era_labels: string[]
+  brief: string
+  sources: HistoricalSourceRef[]
+  ai_verified: boolean
+  model: string | null
+  elapsed_ms: number
+}
+
+export type HistoricalSourceRef = {
+  title: string
+  url: string
+}
+
+export type NovelChapterOutline = {
+  chapter_no: number
+  title: string
+  era_anchor: string
+  summary: string
+  key_conflict: string
+}
+
+export type GeminiScriptScene = {
+  scene_no: number
+  timecode: string
+  duration_s: number
+  shot_type: string
+  camera: string
+  continuity_anchor: string
+  visual: string
+  video_prompt: string
+  voiceover: string
+  audio: string
+}
+
+export type GeminiGeneratedScript = {
+  title: string
+  logline: string
+  tone: string
+  aspect: string
+  style: string
+  profile?: string
+  template_id?: VideoTemplateId | string
+  template_label?: string
+  optimization_notes?: string
+  story_era?: string
+  episode_mode?: 'single' | 'novel_series'
+  historical_context?: string
+  historical_sources?: HistoricalSourceRef[]
+  chapters?: NovelChapterOutline[]
+  duration_s: number
+  markdown: string
+  scenes: GeminiScriptScene[]
+}
+
+export type GeminiScriptResponse = {
+  model: string
+  elapsed_ms: number
+  script: GeminiGeneratedScript
+}
+
+export type LookProfileId =
+  | 'natural_clarity'
+  | 'teal_orange'
+  | 'warm_film'
+  | 'landscape_vivid'
+
+export type OptimizeParams = {
+  profile: LookProfileId
+  denoise: number
+  sharpen: number
+  contrast: number
+  brightness: number
+  saturation: number
+  warmth: number
+  upscale_1080p: boolean
+  smooth_30fps: boolean
+}
+
+export type VideoMediaProbe = {
+  width: number
+  height: number
+  fps: number
+  duration_s: number
+  codec: string
+  pix_fmt: string
+  bit_rate: number | null
+  size_bytes: number
+  has_audio: boolean
+}
+
+export type ExtractedFrame = {
+  index: number
+  filename: string
+  timestamp_s: number
+  timecode: string
+  url: string
+  after_filename?: string | null
+  after_url?: string | null
+}
+
+export type FrameShotBreakdown = {
+  frame_index: number
+  timecode: string
+  shot_type: string
+  subject: string
+  lighting_color: string
+  flaw_diagnosis: string
+  enhance_action: string
+}
+
+export type FrameAnalysisResult = {
+  overall_assessment: string
+  recommended_profile: LookProfileId
+  recommended_profile_reason: string
+  recommended_params: OptimizeParams
+  shots: FrameShotBreakdown[]
+}
+
+export type OptimizeSession = {
+  id: string
+  filename: string
+  created_at: string
+  updated_at: string
+  source_url: string
+  enhanced_url: string | null
+  probe: VideoMediaProbe
+  enhanced_probe: VideoMediaProbe | null
+  frames: ExtractedFrame[]
+  params: OptimizeParams
+  elapsed_ms: number | null
+  filter_summary: string | null
+  ai_analysis: FrameAnalysisResult | null
+}
+
+export type OptimizeSampleItem = {
+  key: string
+  label: string
+  filename: string
+  size_bytes: number
+  description: string
+}
+

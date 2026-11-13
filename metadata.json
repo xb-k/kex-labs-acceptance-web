@@ -1,0 +1,6 @@
+{
+  "name": "Kex Labs · 视频工作台",
+  "description": "Kex Labs 视频工作台：任务计划、渲染监看、QC 门禁与真实交付产物。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

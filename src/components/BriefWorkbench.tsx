@@ -7,6 +7,7 @@ import type {
   StudioPolished,
   StudioShot
 } from '../types'
+import { SelectMenu } from './SelectMenu'
 import { ASPECTS, Field, inputClass, primaryButton, quietButton } from './studio-ui'
 
 /*
@@ -407,19 +408,18 @@ export function BriefWorkbench({
 
   return (
     <div className="mt-2 space-y-3 rounded-[12px] bg-apple-bg/70 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-apple-subtextAlt ring-1 ring-inset ring-black/[0.08]">
-            Brief 工作台
-          </span>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.06] pb-2">
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          <span className="font-semibold text-apple-text">Brief 工作台</span>
+          <span aria-hidden="true" className="text-apple-subtext/60">·</span>
           <span
             data-testid="brief-gate-state"
-            className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ring-inset ${
+            className={`inline-flex items-center gap-1.5 font-medium ${
               confirmed
-                ? 'bg-[#EAF8EE] text-[#1E7A3C] ring-[#CDEED6]'
+                ? 'text-[#1E7A3C]'
                 : polished
-                  ? 'bg-[#FBF1E4] text-[#8A4B00] ring-[#F0D9BC]'
-                  : 'bg-[#F0F0F2] text-apple-subtextAlt ring-[#E2E2E6]'
+                  ? 'text-[#8A4B00]'
+                  : 'text-apple-subtextAlt'
             }`}
           >
             <span
@@ -488,19 +488,18 @@ export function BriefWorkbench({
       </div>
       <div className="grid grid-cols-2 gap-3">
         <Field id="studio-aspect" label="画幅" optional>
-          <select
+          <SelectMenu
             id="studio-aspect"
             value={aspect}
-            onChange={(event) => setAspect(event.target.value)}
+            onChange={setAspect}
             disabled={busy !== null}
-            className={`${inputClass} appearance-none pr-8`}
-          >
-            {ASPECTS.map((option) => (
-              <option key={option.value || 'none'} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+            ariaLabel="画幅比例"
+            size="lg"
+            options={ASPECTS.map((option) => ({
+              value: option.value,
+              label: option.label
+            }))}
+          />
         </Field>
         <Field id="studio-tone" label="调性" optional>
           <input

@@ -1,4 +1,4 @@
-import type { SnapshotRule } from './types'
+import type { QcSummaryJob, SnapshotRule } from './types'
 
 /**
  * #106：QC 门禁的解释层。
@@ -68,6 +68,79 @@ export const RULE_EXPLANATIONS: Record<string, RuleExplanation> = {
     plain: '最偏的 5% 画面的色彩偏差，用来看局部色偏。',
     why: '平均值正常但这一项高，通常是个别镜头偏色。',
     action: '先定位偏色镜头，再单独重跑或统一调色后复核。'
+  },
+  B1_ssim_mean: {
+    plain: '画面结构还原度（满分 1.0）：数值越接近 1，说明处理后越清晰、越没有模糊或马赛克。',
+    why: '低于 0.80 代表画面被过度涂抹或压缩失真，肉眼能看出糊或五官发虚。',
+    action: '适当调低降噪强度、检查编码码率后重新渲染导出。'
+  },
+  B2_noise_change_pct: {
+    plain: '暗部雪花点/颗粒变化：负数代表噪点变少了、画面更干净（比如 -30% 表示雪花少了三成）；正数太大代表变脏了。',
+    why: '高于阈值（+15%）说明锐化把噪点一起放大了，夜间或暗处会出现闪烁颗粒。',
+    action: '开启轻度到中度降噪，或调低锐化幅度后重跑。'
+  },
+  B2_net_gain_vs_baseline_ratio: {
+    plain: '细节清晰度提升倍数：≥1.5× 代表画面轮廓和材质比原片更通透立体；低于 1.0× 说明反而变糊了。',
+    why: '低于阈值意味着美化处理没有带来足够的清晰度提升，甚至可能抹平了纹理。',
+    action: '适度提升锐化与局部对比度，并避免过度磨皮降噪。'
+  },
+  B3_ghost_ratio_median: {
+    plain: '动作拖影/重影比例：越低越好（≤1.5 表示人物挥手、推镜头等快速画面干净利落，不重影）。',
+    why: '高于阈值会在快速移动物体边缘看到「双影/鬼影」，影响观看体验。',
+    action: '关闭或调弱强补帧，或改用更平稳的慢放/原生帧率导出。'
+  }
+}
+
+export function explainJobSummaryRow(job: QcSummaryJob): {
+  headline: string
+  detail: string
+  tone: 'pass' | 'warn' | 'fail' | 'neutral'
+} {
+  if (!job.hasQc && job.judged === 0) {
+    return {
+      headline: '尚未出检',
+      detail: '还没生成质检报告，需等待渲染完成后出数',
+      tone: 'neutral'
+    }
+  }
+  const hints: string[] = []
+  if (job.ssim != null) {
+    hints.push(job.ssim >= 0.8 ? '画面高清不糊' : '画面略糊/失真')
+  }
+  if (job.noiseChangePct != null) {
+    hints.push(
+      job.noiseChangePct <= 0
+        ? `雪花噪点减少 ${Math.abs(job.noiseChangePct).toFixed(0)}%`
+        : job.noiseChangePct <= 15
+          ? '噪点变化在安全范围内'
+          : '噪点增多过快，画面偏脏'
+    )
+  }
+  if (job.netGain != null) {
+    hints.push(job.netGain >= 1.5 ? '细节更立体' : '清晰度提升偏弱')
+  }
+  if (job.ghostRatio != null) {
+    hints.push(job.ghostRatio <= 1.5 ? '动作无拖影' : '有轻微动作重影')
+  }
+
+  if (job.status === 'PASS') {
+    return {
+      headline: '可直接发布',
+      detail: hints.length > 0 ? hints.join(' · ') : '所有已测质量指标均达标',
+      tone: 'pass'
+    }
+  }
+  if (job.status === 'FAIL') {
+    return {
+      headline: '建议重修',
+      detail: hints.length > 0 ? hints.join(' · ') : '存在未过线质量指标，点进详情查看调整建议',
+      tone: 'fail'
+    }
+  }
+  return {
+    headline: '建议抽查',
+    detail: hints.length > 0 ? hints.join(' · ') : '部分指标未检测，建议人工看一遍再发布',
+    tone: 'warn'
   }
 }
 

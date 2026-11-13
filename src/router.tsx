@@ -22,17 +22,12 @@ const TITLE_SUFFIX = ' · KexLabs'
 const TITLE_RULES: Array<[RegExp, string]> = [
   [/^\/job\/[\w-]+\/qc$/, 'QC 质量门禁'],
   [/^\/job\/[\w-]+$/, '任务详情'],
-  [/^\/$/, '工作台总览'],
-  [/^\/studio$/, '创作工坊'],
-  [/^\/flow$/, '自动编排监看'],
-  [/^\/pipeline$/, '渲染工作台与契约'],
+  [/^\/(?:overview)?$/, '视频生产总台'],
+  [/^\/studio$/, '双轨创作工坊'],
   [/^\/jobs$/, '任务中心'],
-  [/^\/status$/, '项目状态'],
   [/^\/qc$/, 'QC 质量门禁'],
-  [/^\/deliveries$/, '交付与资产'],
-  [/^\/reports$/, '报表与周报'],
-  [/^\/agents$/, 'Agent 库'],
-  [/^\/issues$/, 'Issue 收件箱']
+  [/^\/deliveries$/, '交付成片库'],
+  [/^\/agents$/, 'Agent 与提示词库']
 ]
 
 function normalizePath(path: string): string {
