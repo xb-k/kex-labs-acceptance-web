@@ -1288,6 +1288,12 @@ export type GeminiGeneratedScript = {
 export type GeminiScriptResponse = {
   model: string
   elapsed_ms: number
+  grounding?: {
+    used: boolean
+    reason?: string
+    matched_eras?: string[]
+    sources?: HistoricalSourceRef[]
+  }
   script: GeminiGeneratedScript
 }
 

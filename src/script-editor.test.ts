@@ -9,6 +9,7 @@ import {
   mergePlatformProfiles,
   mergePromptTemplates,
   normalizeAgentProfileId,
+  resolveHistoricalGroundingActive,
   sanitizeExportFilename,
   SCRIPT_PRESETS,
   STORY_ERA_OPTIONS,
@@ -135,6 +136,13 @@ test('mergePlatformProfiles preserves canonical 4 profiles and appends active cu
   assert.equal(merged[0].description, '商业广告级青橙配色预设')
   assert.equal(merged[4].id, 'user-cyber-noir')
   assert.equal(merged[4].source, 'custom')
+})
+
+test('resolveHistoricalGroundingActive defaults to off and only enables on explicit opt-in or a non-empty story era', () => {
+  assert.equal(resolveHistoricalGroundingActive(false, ''), false)
+  assert.equal(resolveHistoricalGroundingActive(true, ''), true)
+  assert.equal(resolveHistoricalGroundingActive(false, '清代 · 京华风物与晚清沧桑'), true)
+  assert.equal(resolveHistoricalGroundingActive(false, '   '), false)
 })
 
 test('sanitizeExportFilename strips unsafe characters and appends chosen extension', () => {

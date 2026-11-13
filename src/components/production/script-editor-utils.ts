@@ -126,6 +126,11 @@ export const STORY_ERA_OPTIONS = [
   { value: '民国 · 旧日山河与近代人文', label: '民国 · 时代风貌' }
 ] as const
 
+/** Historical grounding is opt-in: explicit toggle OR a non-empty story era. */
+export function resolveHistoricalGroundingActive(explicitEnabled: boolean, storyEra: string): boolean {
+  return explicitEnabled || storyEra.trim().length > 0
+}
+
 export const SYNC_INTERVAL_OPTIONS = [
   { value: '6', label: '每 6 小时' },
   { value: '12', label: '每 12 小时' },

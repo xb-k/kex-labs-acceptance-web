@@ -10,6 +10,7 @@ import {
   normalizeFrameAnalysis,
   normalizeGeneratedScript,
   resolveAnalyzeFramesBackend,
+  resolveHistoricalGroundingDecision,
   resolveUseHistoricalGrounding
 } from './gemini'
 import { formatHistoricalKnowledgeBrief, matchHistoricalKnowledge } from './historical-kb'
@@ -53,7 +54,28 @@ test('matchHistoricalKnowledge retrieves accurate dynasty attire, artifacts, and
   assert.match(brief, /唐三彩/)
 })
 
-test('resolveUseHistoricalGrounding honors explicit switch state and buildLocalHistoricalContext formats KB context', () => {
+test('resolveHistoricalGroundingDecision requires a concrete story era and honors explicit opt-in/out', () => {
+  // Scenario: 默认（未显式开启、无时代）不接地
+  assert.deepEqual(resolveHistoricalGroundingDecision({ templateId: 'marketing', storyEra: '' }), {
+    used: false,
+    reason: 'story_era_empty'
+  })
+  // Scenario: era 为空时即使请求 true 也跳过
+  assert.deepEqual(
+    resolveHistoricalGroundingDecision({ useHistoricalGroundingFlag: true, templateId: 'marketing', storyEra: '' }),
+    { used: false, reason: 'story_era_empty' }
+  )
+  assert.equal(resolveUseHistoricalGrounding({ templateId: 'historical_novel', storyEra: '' }), false)
+  // Scenario: 显式开启且 era 非空才接地
+  assert.deepEqual(
+    resolveHistoricalGroundingDecision({
+      useHistoricalGroundingFlag: true,
+      templateId: 'marketing',
+      storyEra: '唐代 · 盛唐长安/敦煌丝路'
+    }),
+    { used: true, reason: 'story_era_present' }
+  )
+  // Scenario: 用户显式关闭时即使 era 非空也不接地
   assert.equal(
     resolveUseHistoricalGrounding({
       useHistoricalGroundingFlag: false,
@@ -61,21 +83,6 @@ test('resolveUseHistoricalGrounding honors explicit switch state and buildLocalH
       storyEra: '唐代 · 盛唐长安/敦煌丝路'
     }),
     false
-  )
-  assert.equal(
-    resolveUseHistoricalGrounding({
-      useHistoricalGroundingFlag: true,
-      templateId: 'marketing',
-      storyEra: ''
-    }),
-    true
-  )
-  assert.equal(
-    resolveUseHistoricalGrounding({
-      templateId: 'historical_novel',
-      storyEra: ''
-    }),
-    true
   )
 
   const ctx = buildLocalHistoricalContext('宋代 · 汴梁/江南市井雅韵', '江南瓦肆茶坊')
@@ -560,6 +567,88 @@ test('POST /api/gemini/script falls back to Ollama JSON mode when no Gemini key 
     assert.match(seen[0].body.prompt, /清晨轻轨上的护士/)
     assert.match(seen[0].body.prompt, /12 秒/)
     assert.match(seen[0].body.prompt, /克制温暖/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('POST /api/gemini/script defaults to no historical grounding for a modern ad prompt', async () => {
+  const realFetch = globalThis.fetch
+  const seen: Array<{ body: any }> = []
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push({ body: JSON.parse(String(init?.body ?? '{}')) })
+    return new Response(JSON.stringify({ response: JSON.stringify(SCRIPT_JSON) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+  }) as typeof fetch
+  try {
+    const res = await callScript({ prompt: '咖啡广告', template_id: 'marketing', duration_s: 15 })
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body.grounding, {
+      used: false,
+      reason: 'story_era_empty',
+      matched_eras: [],
+      sources: []
+    })
+    assert.doesNotMatch(seen[0].body.prompt, /历史史实严谨性要求/)
+    assert.doesNotMatch(seen[0].body.prompt, /本地历史知识库参考上下文/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('POST /api/gemini/script grounds only when explicitly enabled with a non-empty story era', async () => {
+  const realFetch = globalThis.fetch
+  const seen: Array<{ body: any }> = []
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push({ body: JSON.parse(String(init?.body ?? '{}')) })
+    return new Response(JSON.stringify({ response: JSON.stringify(SCRIPT_JSON) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+  }) as typeof fetch
+  try {
+    const res = await callScript({
+      prompt: '咖啡广告',
+      template_id: 'marketing',
+      duration_s: 15,
+      story_era: '清代 · 京华风物与晚清沧桑',
+      use_historical_grounding: true
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.grounding.used, true)
+    assert.equal(res.body.grounding.reason, 'story_era_present')
+    assert.ok(res.body.grounding.matched_eras.includes('清代 · 京华风物与晚清沧桑'))
+    assert.match(seen[0].body.prompt, /历史史实严谨性要求/)
+    assert.match(seen[0].body.prompt, /本地历史知识库参考上下文/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('POST /api/gemini/script skips grounding when the request forces true but story_era is empty', async () => {
+  const realFetch = globalThis.fetch
+  const seen: Array<{ body: any }> = []
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push({ body: JSON.parse(String(init?.body ?? '{}')) })
+    return new Response(JSON.stringify({ response: JSON.stringify(SCRIPT_JSON) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+  }) as typeof fetch
+  try {
+    const res = await callScript({
+      prompt: '咖啡广告',
+      template_id: 'marketing',
+      duration_s: 15,
+      use_historical_grounding: true
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.grounding.used, false)
+    assert.equal(res.body.grounding.reason, 'story_era_empty')
+    assert.doesNotMatch(seen[0].body.prompt, /历史史实严谨性要求/)
+    assert.doesNotMatch(seen[0].body.prompt, /本地历史知识库参考上下文/)
   } finally {
     globalThis.fetch = realFetch
   }

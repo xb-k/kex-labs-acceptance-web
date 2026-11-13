@@ -755,15 +755,47 @@ async function handleAnalyzeFrames(
   return true
 }
 
+export type HistoricalGroundingReason =
+  | 'story_era_empty'
+  | 'user_disabled'
+  | 'story_era_present'
+  | 'historical_template'
+
+export interface HistoricalGroundingDecision {
+  used: boolean
+  reason: HistoricalGroundingReason
+}
+
+/**
+ * Historical grounding requires a concrete story era. An empty `story_era`
+ * must never trigger era/KB injection, even when the caller sends
+ * `use_historical_grounding: true` (older clients defaulted it to true and
+ * polluted modern ads with unrelated dynasties such as Qing).
+ */
+export function resolveHistoricalGroundingDecision(input: {
+  useHistoricalGroundingFlag?: unknown
+  templateId?: string
+  storyEra?: string
+}): HistoricalGroundingDecision {
+  const storyEra = typeof input.storyEra === 'string' ? input.storyEra.trim() : ''
+  if (!storyEra) return { used: false, reason: 'story_era_empty' }
+  if (typeof input.useHistoricalGroundingFlag === 'boolean') {
+    return input.useHistoricalGroundingFlag
+      ? { used: true, reason: 'story_era_present' }
+      : { used: false, reason: 'user_disabled' }
+  }
+  if (input.templateId === 'historical_novel') {
+    return { used: true, reason: 'historical_template' }
+  }
+  return { used: false, reason: 'user_disabled' }
+}
+
 export function resolveUseHistoricalGrounding(input: {
   useHistoricalGroundingFlag?: unknown
   templateId?: string
   storyEra?: string
 }): boolean {
-  if (typeof input.useHistoricalGroundingFlag === 'boolean') {
-    return input.useHistoricalGroundingFlag
-  }
-  return input.templateId === 'historical_novel' || Boolean(input.storyEra)
+  return resolveHistoricalGroundingDecision(input).used
 }
 
 export function buildLocalHistoricalContext(storyEra: string, prompt: string): {
@@ -1272,11 +1304,12 @@ export async function handleGeminiRoute(
     typeof record.story_era === 'string' && record.story_era.trim()
       ? record.story_era.trim().slice(0, 80)
       : ''
-  const useHistoricalGrounding = resolveUseHistoricalGrounding({
+  const groundingDecision = resolveHistoricalGroundingDecision({
     useHistoricalGroundingFlag: record.use_historical_grounding,
     templateId: template.id,
     storyEra
   })
+  const useHistoricalGrounding = groundingDecision.used
   const previousTitle =
     typeof record.previousTitle === 'string' && record.previousTitle.trim()
       ? record.previousTitle.trim().slice(0, 120)
@@ -1328,6 +1361,13 @@ export async function handleGeminiRoute(
         sources: []
       }
     }
+  }
+
+  const groundingMeta = {
+    used: groundingDecision.used,
+    reason: groundingDecision.reason,
+    matched_eras: historicalGrounding.matchedEras,
+    sources: historicalGrounding.sources
   }
 
   const normalizeDefaults = {
@@ -1499,6 +1539,7 @@ export async function handleGeminiRoute(
       ctx.sendJson(res, 200, {
         model: GEMINI_MODEL,
         elapsed_ms: Date.now() - started,
+        grounding: groundingMeta,
         script
       })
       return true
@@ -1535,6 +1576,7 @@ export async function handleGeminiRoute(
     ctx.sendJson(res, 200, {
       model: ollama.model,
       elapsed_ms: Date.now() - started,
+      grounding: groundingMeta,
       script
     })
     return true

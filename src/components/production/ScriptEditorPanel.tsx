@@ -23,6 +23,7 @@ import {
   CANONICAL_DURATION_OPTIONS,
   mergePlatformProfiles,
   mergePromptTemplates,
+  resolveHistoricalGroundingActive,
   sanitizeExportFilename,
   SCRIPT_PRESETS,
   STORY_ERA_OPTIONS,
@@ -115,10 +116,11 @@ export function ScriptEditorPanel({
 
   const [episodeMode, setEpisodeMode] = useState<'single' | 'novel_series'>('single')
   const [storyEra, setStoryEra] = useState<string>('')
-  const [useHistoricalGrounding, setUseHistoricalGrounding] = useState(true)
+  const [useHistoricalGrounding, setUseHistoricalGrounding] = useState(false)
   const [kbPreview, setKbPreview] = useState<HistoricalLookupResponse | null>(null)
   const [kbLoading, setKbLoading] = useState(false)
   const [kbError, setKbError] = useState<string | null>(null)
+  const historicalGroundingActive = resolveHistoricalGroundingActive(useHistoricalGrounding, storyEra)
 
   const [selectedProfileId, setSelectedProfileId] = useState('ad_teal_orange')
   const [durationS, setDurationS] = useState('15')
@@ -212,21 +214,22 @@ export function ScriptEditorPanel({
   }
 
   useEffect(() => {
-    if (!useHistoricalGrounding) return
+    if (!historicalGroundingActive) return
     const timer = window.setTimeout(() => {
       void fetchHistoricalKb(prompt, storyEra)
     }, 240)
     return () => window.clearTimeout(timer)
-  }, [useHistoricalGrounding, storyEra, prompt])
+  }, [historicalGroundingActive, storyEra, prompt])
 
   const toggleHistoricalGrounding = () => {
-    const next = !useHistoricalGrounding
-    setUseHistoricalGrounding(next)
-    if (next) {
-      void fetchHistoricalKb(prompt, storyEra)
-    } else {
+    if (historicalGroundingActive) {
+      setUseHistoricalGrounding(false)
+      if (storyEra.trim()) setStoryEra('')
       setKbPreview(null)
       setKbError(null)
+    } else {
+      setUseHistoricalGrounding(true)
+      void fetchHistoricalKb(prompt, storyEra)
     }
   }
 
@@ -258,6 +261,7 @@ export function ScriptEditorPanel({
       overrides?.directivesOverride ?? customDirectives[targetTemplate.id] ?? targetTemplate.systemDirectives
     const targetEpisodeMode = overrides?.episodeModeVal ?? episodeMode
     const targetStoryEra = overrides?.storyEraVal ?? storyEra
+    const targetHistoricalGrounding = resolveHistoricalGroundingActive(useHistoricalGrounding, targetStoryEra)
 
     const controller = new AbortController()
     scriptAbortRef.current = controller
@@ -266,7 +270,7 @@ export function ScriptEditorPanel({
     setGenerateStartedAt(Date.now())
     setGenerateStage(0)
     setActiveModeLabel(
-      useHistoricalGrounding
+      targetHistoricalGrounding
         ? '检索本地历史知识库'
         : mode === 'optimize'
           ? `按「${targetTemplate.category}」规范实时重构`
@@ -280,7 +284,7 @@ export function ScriptEditorPanel({
     onProcessingChange?.(true)
 
     try {
-      if (useHistoricalGrounding) {
+      if (targetHistoricalGrounding) {
         try {
           const kbRes = await postJson<HistoricalLookupResponse>('/api/gemini/historical-kb/lookup', {
             prompt: cleanPrompt,
@@ -298,7 +302,7 @@ export function ScriptEditorPanel({
           ? `按「${targetTemplate.category}」规范实时重构`
           : mode === 'regenerate'
             ? '重构分场视点'
-            : useHistoricalGrounding
+            : targetHistoricalGrounding
               ? '注入本地历史知识库并编写剧本'
               : targetEpisodeMode === 'novel_series'
                 ? '小说分章创作'
@@ -322,7 +326,7 @@ export function ScriptEditorPanel({
         aspect: targetAspect,
         episode_mode: targetEpisodeMode,
         story_era: targetStoryEra,
-        use_historical_grounding: useHistoricalGrounding,
+        use_historical_grounding: targetHistoricalGrounding,
         mode,
         previousTitle: generated?.title,
         previous_script:
@@ -1103,7 +1107,7 @@ export function ScriptEditorPanel({
             <div
               data-testid="script-novel-history-box"
               className={`rounded-[12px] border p-3.5 transition-colors ${
-                useHistoricalGrounding
+                historicalGroundingActive
                   ? 'border-[#9CC3FF] bg-[#F4F8FF]'
                   : 'border-black/[0.09] bg-[#FAFAFB]'
               }`}
@@ -1113,17 +1117,17 @@ export function ScriptEditorPanel({
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={useHistoricalGrounding}
+                    aria-checked={historicalGroundingActive}
                     aria-label="历史背景检索"
                     data-testid="script-historical-grounding-checkbox"
                     onClick={toggleHistoricalGrounding}
                     className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 ${
-                      useHistoricalGrounding ? 'bg-apple-blue' : 'bg-black/[0.22]'
+                      historicalGroundingActive ? 'bg-apple-blue' : 'bg-black/[0.22]'
                     }`}
                   >
                     <span
                       className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.22)] transition-transform duration-200 ${
-                        useHistoricalGrounding ? 'translate-x-5' : 'translate-x-0.5'
+                        historicalGroundingActive ? 'translate-x-5' : 'translate-x-0.5'
                       }`}
                     />
                   </button>
@@ -1136,7 +1140,7 @@ export function ScriptEditorPanel({
                     <div className="flex items-center gap-1.5">
                       <Shield
                         className={`h-3.5 w-3.5 shrink-0 ${
-                          useHistoricalGrounding ? 'text-apple-blueInk' : 'text-apple-subtext'
+                          historicalGroundingActive ? 'text-apple-blueInk' : 'text-apple-subtext'
                         }`}
                       />
                       <span className="text-[13px] font-semibold text-apple-text">
@@ -1144,21 +1148,21 @@ export function ScriptEditorPanel({
                       </span>
                       <span
                         className={`text-[11px] font-medium ${
-                          useHistoricalGrounding ? 'text-apple-blueInk' : 'text-apple-subtext'
+                          historicalGroundingActive ? 'text-apple-blueInk' : 'text-apple-subtext'
                         }`}
                       >
-                        · {useHistoricalGrounding ? '已开启' : '已关闭'}
+                        · {historicalGroundingActive ? '已开启' : '已关闭'}
                       </span>
                     </div>
                     <p className="mt-0.5 text-[11px] text-apple-subtext">
-                      {useHistoricalGrounding
+                      {historicalGroundingActive
                         ? '生成剧本时自动检索并注入本地历史知识库上下文（服饰、器物、制度与禁忌）'
                         : '跳过史实约束，适合纯现代商业片或架空题材'}
                     </p>
                   </button>
                 </div>
 
-                {useHistoricalGrounding && (
+                {historicalGroundingActive && (
                   <button
                     type="button"
                     onClick={() => void fetchHistoricalKb(prompt, storyEra)}
@@ -1170,7 +1174,7 @@ export function ScriptEditorPanel({
                 )}
               </div>
 
-              {useHistoricalGrounding && (
+              {historicalGroundingActive && (
                 <div className="mt-2.5 border-t border-[#C6DCFF]/70 pt-2 text-[11px] leading-relaxed text-apple-subtext">
                   {kbLoading && !kbPreview ? (
                     <span>正在检索本地历史知识库与时代档案…</span>
