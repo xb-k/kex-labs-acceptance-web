@@ -6,6 +6,7 @@ dist/
 *.tsbuildinfo
 server/serve.mjs
 server/sync.mjs
+vite.config.ts.timestamp-*
 
 # evidence / artifacts
 screenshots/
