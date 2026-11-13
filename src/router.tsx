@@ -10,6 +10,7 @@ import {
   type MouseEvent,
   type ReactNode
 } from 'react'
+import { movedPageFor } from './moved-pages'
 
 type RouterValue = {
   path: string
@@ -36,6 +37,8 @@ function normalizePath(path: string): string {
 
 function titleFor(path: string): string {
   const normalized = normalizePath(path)
+  const moved = movedPageFor(normalized)
+  if (moved) return `${moved.title}${TITLE_SUFFIX}`
   const hit = TITLE_RULES.find(([pattern]) => pattern.test(normalized))
   return `${hit ? hit[1] : '页面不存在'}${TITLE_SUFFIX}`
 }

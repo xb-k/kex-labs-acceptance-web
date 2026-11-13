@@ -1,4 +1,3 @@
-import { useEffect } from 'react'
 import { Shell } from './components/Shell'
 import { RouterProvider, useRouter, Link } from './router'
 import { JobsPage } from './pages/JobsPage'
@@ -9,14 +8,8 @@ import { DeliveriesPage } from './pages/DeliveriesPage'
 import { StudioPage } from './pages/StudioPage'
 import { ProductionTrackerPage } from './pages/ProductionTrackerPage'
 import { AgentsPage } from './pages/AgentsPage'
-
-function RedirectHome() {
-  const { navigate } = useRouter()
-  useEffect(() => {
-    navigate('/')
-  }, [navigate])
-  return <ProductionTrackerPage />
-}
+import { MovedPage } from './pages/MovedPage'
+import { movedPageFor } from './moved-pages'
 
 function Routes() {
   const { path: raw } = useRouter()
@@ -34,9 +27,7 @@ function Routes() {
   if (path === '/deliveries') return <DeliveriesPage />
   if (path === '/agents') return <AgentsPage />
 
-  if (path === '/status' || path === '/reports' || path === '/issues' || path === '/flow' || path === '/pipeline') {
-    return <RedirectHome />
-  }
+  if (movedPageFor(path)) return <MovedPage path={path} />
 
   return (
     <div className="card p-8">
