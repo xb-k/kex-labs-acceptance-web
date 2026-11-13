@@ -207,19 +207,40 @@ export function StudioJobDetail({
             <DetailSection title={`资产${otherAssets.length > 0 ? ` · ${otherAssets.length} 项` : ''}`}>
               {otherAssets.length > 0 ? (
                 <ul className="space-y-1.5">
-                  {otherAssets.map((asset) => (
-                    <li key={asset.id} className="flex items-baseline gap-2">
-                      <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] text-apple-subtext ring-1 ring-inset ring-black/[0.06]">
-                        {KIND_LABEL[asset.kind] ?? asset.kind}
-                      </span>
-                      <span className="num min-w-0 flex-1 break-all text-[11px]">
-                        {asset.uri.replace(/^studio:\/\//, '')}
-                      </span>
-                      <span className="num shrink-0 text-[11px] text-apple-subtext">
-                        {formatSizeBytes(asset.size_bytes)}
-                      </span>
-                    </li>
-                  ))}
+                  {otherAssets.map((asset) => {
+                    // #151: proxy-served artifacts show the file name + size + a
+                    // download link instead of the raw studio path.
+                    const proxied = asset.uri.startsWith('/api/studio/jobs/')
+                    const fileName = proxied
+                      ? decodeURIComponent(asset.uri.split('/').pop() ?? '')
+                      : asset.uri.replace(/^studio:\/\//, '')
+                    return (
+                      <li key={asset.id} className="flex flex-wrap items-baseline gap-2">
+                        <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] text-apple-subtext ring-1 ring-inset ring-black/[0.06]">
+                          {KIND_LABEL[asset.kind] ?? asset.kind}
+                        </span>
+                        <span
+                          className="num min-w-0 flex-1 break-all text-[11px]"
+                          title={fileName}
+                          data-testid={`studio-asset-${asset.id}`}
+                        >
+                          {fileName}
+                        </span>
+                        <span className="num shrink-0 text-[11px] text-apple-subtext">
+                          {asset.size_bytes > 0 ? formatSizeBytes(asset.size_bytes) : '大小未知'}
+                        </span>
+                        {proxied && (
+                          <a
+                            href={asset.uri}
+                            download={fileName}
+                            className="shrink-0 text-[11px] font-medium text-apple-blueInk underline underline-offset-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+                          >
+                            下载
+                          </a>
+                        )}
+                      </li>
+                    )
+                  })}
                 </ul>
               ) : (
                 <p className="text-[11px] text-apple-subtext">

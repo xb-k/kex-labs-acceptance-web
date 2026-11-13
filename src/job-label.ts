@@ -156,19 +156,16 @@ export function jobReadable(job: JobLabelInput | null | undefined): string {
   return parts.join(' · ')
 }
 
-/** 可读缩略 id：`web-20261113093155-3ef5f3` → `…3ef5f3`。 */
-export function jobIdShort(id: string | null | undefined): string {
-  const value = text(id)
-  if (!value) return ''
-  if (value.length <= 10) return value
-  return `…${value.slice(-6)}`
+/** #152: 列表/卡片展示完整 id；末 6 位无法定位任务。 */
+export function jobIdDisplay(id: string | null | undefined): string {
+  return text(id)
 }
 
-/** 主标签 + 缩略 id（需要「小号等宽」的样式由调用方决定）。 */
+/** 主标签 + 完整 id（需要「小号等宽」的样式由调用方决定）。 */
 export function jobLabelWithId(job: JobLabelInput | null | undefined): string {
   const label = jobReadable(job)
-  const short = jobIdShort(job?.id)
-  return short ? `${label} · ${short}` : label
+  const full = jobIdDisplay(job?.id)
+  return full ? `${label} · ${full}` : label
 }
 
 /** 页面上真实出现的可读字段（状态、判据、分辨率、阶段等），筛选要覆盖。 */

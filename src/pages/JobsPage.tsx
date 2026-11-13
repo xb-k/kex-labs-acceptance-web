@@ -7,7 +7,7 @@ import { StudioStatusChip } from '../components/StudioStatusChip'
 import { SnapshotStatusStage } from '../components/SnapshotStatusStage'
 import { ChevronRight, Clapper, Film, Refresh } from '../components/icons'
 import { formatResolution, formatStamp } from '../format'
-import { jobIdShort, jobReadable, matchesJobQuery } from '../job-label'
+import { jobIdDisplay, jobReadable, matchesJobQuery } from '../job-label'
 import { readSearchParam, updateSearchParams } from '../url'
 import { SelectMenu } from '../components/SelectMenu'
 import { FilterChipGroup } from '../components/ui'
@@ -248,9 +248,9 @@ function StudioJobsTab({ query }: { query: string }) {
                           <StudioStatusChip status={job.status} />
                         </span>
                       </div>
-                      <p className="mt-1 truncate text-[11px] leading-relaxed text-apple-subtext">
-                        <span className="num" title={job.id}>
-                          {jobIdShort(job.id)}
+                      <p className="mt-1 break-words text-[11px] leading-relaxed text-apple-subtext">
+                        <span className="num" title={job.id} data-job-id={job.id}>
+                          {jobIdDisplay(job.id)}
                         </span>{' '}
                         · {formatStamp(job.created_at)} · Brief{' '}
                         <span className="num">{job.brief_id ?? '—'}</span>
@@ -460,8 +460,12 @@ function BTrackTab({ query }: { query: string }) {
                       <span className="text-xs font-semibold text-apple-blueInk">
                         {job.track} 轨
                       </span>
-                      <span className="num truncate text-[11px] text-apple-subtext" title={job.id}>
-                        {jobIdShort(job.id)}
+                      <span
+                        className="num break-all text-[11px] text-apple-subtext"
+                        title={job.id}
+                        data-job-id={job.id}
+                      >
+                        {jobIdDisplay(job.id)}
                       </span>
                     </div>
 

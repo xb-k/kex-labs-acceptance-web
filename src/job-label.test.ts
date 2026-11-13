@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { jobBasename, jobIdShort, jobLabelWithId, jobReadable, matchesJobQuery } from './job-label'
+import { jobBasename, jobIdDisplay, jobLabelWithId, jobReadable, matchesJobQuery } from './job-label'
 
 test('#102 图片生成：类型 + 轨别 + 素材 basename + 时间 + 状态', () => {
   const label = jobReadable({
@@ -77,16 +77,18 @@ test('#102 时间格式固定为 MM-DD HH:mm，非法时间省略', () => {
   assert.equal(jobReadable({ id: 'x', created_at: 'not-a-date' }), '任务')
 })
 
-test('#102 jobIdShort 保留可读缩略，短 id 原样', () => {
-  assert.equal(jobIdShort('web-20261113093155-3ef5f3'), '…3ef5f3')
-  assert.equal(jobIdShort('s0'), 's0')
-  assert.equal(jobIdShort(null), '')
+test('#152 jobIdDisplay 返回完整 id，末 6 位不再截断', () => {
+  const id = 'web-20261114040236-03db66'
+  assert.equal(jobIdDisplay(id), id)
+  assert.ok(jobIdDisplay(id).endsWith(id))
+  assert.equal(jobIdDisplay('s0'), 's0')
+  assert.equal(jobIdDisplay(null), '')
 })
 
-test('#102 jobLabelWithId = 主标签 + 缩略 id', () => {
+test('#152 jobLabelWithId = 主标签 + 完整 id', () => {
   assert.equal(
     jobLabelWithId({ id: 'web-20261113093155-3ef5f3', type: 'image', status: 'succeeded' }),
-    '图片生成 · 完成 · …3ef5f3'
+    '图片生成 · 完成 · web-20261113093155-3ef5f3'
   )
 })
 

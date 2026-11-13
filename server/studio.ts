@@ -983,10 +983,27 @@ export function studioProjection(detail: any): {
 }
 
 /**
- * Assets are derived from the intake state's `artifacts` map. A path only
- * becomes an Asset when this process can stat it as a regular file — on the
- * NAS container the studio tree is not mounted, so the list is empty there
- * (known W2 boundary: media playback is not wired yet).
+ * #151: an artifact path under `jobs/<job>/output/<name>` is servable through
+ * the intake artifact proxy, even when this process cannot stat it (the NAS
+ * container has no studio mount). Anything else must be a real local file.
+ */
+function proxyArtifactName(rawPath: string): string | null {
+  const parts = rawPath.split(/[\\/]+/).filter(Boolean)
+  const name = parts[parts.length - 1] ?? ''
+  if (!name || name === '.' || name === '..') return null
+  const isOutput =
+    parts.length >= 4 &&
+    parts[parts.length - 2] === 'output' &&
+    parts[parts.length - 4] === 'jobs' &&
+    JOB_NAME_RE.test(parts[parts.length - 3] ?? '')
+  return isOutput ? name : null
+}
+
+/**
+ * Assets are derived from the intake state's `artifacts` map. A path becomes
+ * an Asset when it is either a real local file (this process can stat it) or a
+ * `jobs/<job>/output/<name>` artifact reachable through the intake proxy. The
+ * proxy case is what makes a succeeded job's `final.mp4` show up on the NAS.
  */
 function collectAssets(
   id: string,
@@ -1025,12 +1042,14 @@ function collectAssets(
   // #89b: image artifacts are stored relative to the studio repo root and the
   // web host cannot stat them; they are served through the artifact proxy so
   // the browser never sees an absolute studio path.
-  const proxied = meta?.type === 'image'
+  const imageType = meta?.type === 'image'
   for (const [rawKey, rawPath] of Object.entries(artifacts)) {
     if (typeof rawPath !== 'string') continue
-    if (!rawPath.startsWith('/') && !proxied) continue
     const kind = kindFor(rawPath)
     if (!kind) continue
+    // #151: `jobs/<job>/output/<name>` is served by intake; the older image
+    // jobs pass relative paths, so keep the basename fallback for them.
+    const servedName = proxyArtifactName(rawPath) ?? (imageType ? path.basename(rawPath) : null)
     let stat: fs.Stats | null = null
     if (rawPath.startsWith('/')) {
       try {
@@ -1039,15 +1058,15 @@ function collectAssets(
       } catch {
         stat = null
       }
-      if (!proxied && !stat) continue
     }
+    if (!servedName && !stat) continue
     const key = rawKey === 'final_video' ? 'final' : sanitizeKey(rawKey)
     const assetId = `asset_${id}_${key}`
     assets.push({
       id: assetId,
       kind,
-      uri: proxied
-        ? `/api/studio/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(path.basename(rawPath))}`
+      uri: servedName
+        ? `/api/studio/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(servedName)}`
         : `studio://${rawPath}`,
       sha256: null,
       size_bytes: stat?.size ?? 0,
@@ -1061,7 +1080,8 @@ function collectAssets(
       license: null,
       created_at: stat ? new Date(stat.mtimeMs).toISOString() : (meta?.created_at ?? nowIso())
     })
-    if (kind === 'video') outputs.push(assetId)
+    // #151: produced media lands in `outputs`; reports/dirs never do.
+    if (kind === 'video' || kind === 'image') outputs.push(assetId)
   }
   return { assets, outputs }
 }
@@ -1786,6 +1806,39 @@ async function serveArtifact(
   }
 }
 
+/**
+ * #151: proxy-served artifacts cannot be stat'ed from this host, so the size
+ * comes from the intake artifact HEAD (Content-Length). Failures leave 0 —
+ * the download link still works and no size is invented.
+ */
+async function fillProxySizes(ctx: StudioContext, job: Job): Promise<void> {
+  const targets = job.assets.filter(
+    (asset) => asset.size_bytes === 0 && asset.uri.startsWith('/api/studio/jobs/')
+  )
+  if (targets.length === 0) return
+  await Promise.all(
+    targets.map(async (asset) => {
+      const name = decodeURIComponent(asset.uri.split('/').pop() ?? '')
+      if (!name) return
+      try {
+        const upstream = await fetch(
+          `${ctx.intakeUrl}/intake/jobs/${encodeURIComponent(job.id)}/artifacts/${encodeURIComponent(name)}`,
+          {
+            method: 'HEAD',
+            headers: ctx.webToken ? { 'X-Web-Token': ctx.webToken } : {},
+            signal: AbortSignal.timeout(Math.min(ctx.timeoutMs, 2500))
+          }
+        )
+        const length = Number(upstream.headers.get('content-length'))
+        await upstream.body?.cancel().catch(() => {})
+        if (upstream.ok && Number.isFinite(length) && length > 0) asset.size_bytes = length
+      } catch {
+        // Size stays 0 (unknown); never block the detail response on a HEAD.
+      }
+    })
+  )
+}
+
 async function jobDetail(ctx: StudioContext, res: ServerResponse, id: string) {
   if (!requireIntakeToken(ctx, res)) return
   if (!JOB_NAME_RE.test(id)) {
@@ -1801,7 +1854,9 @@ async function jobDetail(ctx: StudioContext, res: ServerResponse, id: string) {
     ctx.sendJson(res, upstream.status, upstream.body ?? { error: 'job not found' })
     return
   }
-  ctx.sendJson(res, 200, buildStudioJob(ctx, id, upstream.body))
+  const job = buildStudioJob(ctx, id, upstream.body)
+  await fillProxySizes(ctx, job)
+  ctx.sendJson(res, 200, job)
 }
 
 async function cancelJob(ctx: StudioContext, req: IncomingMessage, res: ServerResponse, id: string) {

@@ -10,7 +10,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { checkArtifactName, handleStudioRoute } from './studio'
+import { buildStudioJob, checkArtifactName, handleStudioRoute } from './studio'
 import type { StudioContext } from './studio'
 
 const TOKEN = 'artifact86-test-token'
@@ -67,6 +67,27 @@ before(async () => {
     if (req.url === '/intake/jobs/j1/artifacts/summary.json') {
       res.setHeader('Content-Type', 'application/json')
       res.end('{"ok":true}')
+      return
+    }
+    if (req.url === '/intake/jobs/j2') {
+      res.setHeader('Content-Type', 'application/json')
+      res.end(
+        JSON.stringify({
+          state: 'succeeded',
+          updated_at: '2026-11-14T04:06:01+08:00',
+          artifacts: {
+            final_video:
+              '/Users/kexinbao/kex/projects/kex-labs-video/jobs/j2/output/final.mp4',
+            shots: '/Users/kexinbao/kex/projects/kex-labs-video/jobs/j2/shots.json'
+          }
+        })
+      )
+      return
+    }
+    if (req.url === '/intake/jobs/j2/artifacts/final.mp4') {
+      res.setHeader('Content-Type', 'video/mp4')
+      res.setHeader('Content-Length', '4577703')
+      res.end(req.method === 'HEAD' ? undefined : 'x')
       return
     }
     if (req.url === '/intake/jobs/j1/artifacts/oob.mp4') {
@@ -224,6 +245,46 @@ test('upstream 5xx still becomes 502', async () => {
 test('only GET/HEAD are allowed', async () => {
   const r = await fetch(`${base}/api/studio/jobs/j1/artifacts/final.mp4`, { method: 'POST' })
   assert.equal(r.status, 405)
+})
+
+// ---------------------------------------------------------------------------
+// #151 assets projection
+// ---------------------------------------------------------------------------
+
+const J151 = 'web-20261114040236-03db66'
+const J151_ROOT = `/Users/kexinbao/kex/projects/kex-labs-video/jobs/${J151}`
+
+test('#151 artifacts 里的 final.mp4 映射进 outputs/assets，URL 走代理', () => {
+  const job = buildStudioJob(ctx, J151, {
+    state: 'succeeded',
+    updated_at: '2026-11-14T04:06:01+08:00',
+    artifacts: {
+      final_video: `${J151_ROOT}/output/final.mp4`,
+      shots: `${J151_ROOT}/shots.json`,
+      decisions: `/Users/kexinbao/kex/projects/kex-labs-video/decisions/${J151}.jsonl`
+    }
+  })
+  assert.deepEqual(job.outputs, [`asset_${J151}_final`])
+  assert.equal(job.assets.length, 1, '非 output/ 下的报告不得伪造为资产')
+  const final = job.assets[0]
+  assert.equal(final.kind, 'video')
+  assert.equal(final.uri, `/api/studio/jobs/${J151}/artifacts/final.mp4`)
+})
+
+test('#151 无 artifacts 的 job → assets/outputs 为空（不伪造）', () => {
+  const job = buildStudioJob(ctx, J151, { state: 'succeeded', artifacts: {} })
+  assert.deepEqual(job.assets, [])
+  assert.deepEqual(job.outputs, [])
+})
+
+test('#151 详情按 intake HEAD 回填真实大小', async () => {
+  const r = await fetch(`${base}/api/studio/jobs/j2`)
+  assert.equal(r.status, 200)
+  const body = (await r.json()) as any
+  assert.deepEqual(body.outputs, ['asset_j2_final'])
+  assert.equal(body.assets.length, 1)
+  assert.equal(body.assets[0].uri, '/api/studio/jobs/j2/artifacts/final.mp4')
+  assert.equal(body.assets[0].size_bytes, 4577703)
 })
 
 // keep the type import used so TS treats this as a server-context test
