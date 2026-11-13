@@ -15,6 +15,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { contentTypeFor, serveStream } from './media'
+import { ollamaFetch } from './ollama'
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 export type JobType = 'aigc' | 'optimize' | 'image'
@@ -592,7 +593,7 @@ function textModelNames(body: unknown): string[] {
 /** `body.model` wins; otherwise pick a text model reported by `/api/tags`. */
 async function pickPolishModel(base: string, requested: unknown): Promise<string | null> {
   if (typeof requested === 'string' && requested.trim()) return requested.trim()
-  const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(POLISH_TAGS_TIMEOUT_MS) })
+  const res = await ollamaFetch(`${base}/api/tags`, { signal: AbortSignal.timeout(POLISH_TAGS_TIMEOUT_MS) })
   if (!res.ok) throw new Error(`tags HTTP ${res.status}`)
   const names = textModelNames(await res.json().catch(() => null))
   if (!names.length) return null
@@ -658,7 +659,7 @@ async function callPolishLlm(brief: Brief, requestedModel: unknown): Promise<Pol
   if (!model) return { ok: false, reason: 'no text model available' }
   let response: Response
   try {
-    response = await fetch(`${base}/api/generate`, {
+    response = await ollamaFetch(`${base}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

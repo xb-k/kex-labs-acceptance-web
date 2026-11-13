@@ -60,6 +60,7 @@ import {
 import { handleAgentsRoute } from './agents'
 import { handleDecisionsRoute } from './decisions'
 import { handleGeminiRoute } from './gemini'
+import { ollamaFetch } from './ollama'
 import { handleUploadsRoute } from './uploads'
 import { handleVideoOptimizeRoute } from './video-optimize'
 import {
@@ -3072,7 +3073,7 @@ async function scoreCoverFrames(frames: string[]): Promise<{ pick: number; reaso
   ].join('\n')
   try {
     const images = frames.map((f) => fs.readFileSync(f).toString('base64'))
-    const res = await fetch(`${OLLAMA_URL}/api/generate`, {
+    const res = await ollamaFetch(`${OLLAMA_URL}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3444,7 +3445,7 @@ async function explainJob(jobId: string, force: boolean): Promise<CoverResult> {
 
   let parsed: any
   try {
-    const res = await fetch(`${OLLAMA_URL}/api/generate`, {
+    const res = await ollamaFetch(`${OLLAMA_URL}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

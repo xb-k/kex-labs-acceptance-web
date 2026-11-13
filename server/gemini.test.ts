@@ -430,13 +430,15 @@ const savedEnv = {
   model: process.env.OLLAMA_TEXT_MODEL,
   vlmModel: process.env.OLLAMA_VLM_MODEL,
   backend: process.env.WEB_LLM_BACKEND,
-  token: process.env.WEB_WRITE_TOKEN
+  token: process.env.WEB_WRITE_TOKEN,
+  ollamaToken: process.env.OLLAMA_TOKEN
 }
 
 beforeEach(() => {
   delete process.env.GEMINI_API_KEY
   delete process.env.WEB_WRITE_TOKEN
   delete process.env.WEB_LLM_BACKEND
+  delete process.env.OLLAMA_TOKEN
   process.env.OLLAMA_URL = 'http://127.0.0.1:11499'
   process.env.OLLAMA_TEXT_MODEL = 'script-test-model'
   process.env.OLLAMA_VLM_MODEL = 'vlm-test-model'
@@ -444,7 +446,14 @@ beforeEach(() => {
 
 after(() => {
   const restore = (
-    key: 'GEMINI_API_KEY' | 'OLLAMA_URL' | 'OLLAMA_TEXT_MODEL' | 'OLLAMA_VLM_MODEL' | 'WEB_LLM_BACKEND' | 'WEB_WRITE_TOKEN',
+    key:
+      | 'GEMINI_API_KEY'
+      | 'OLLAMA_URL'
+      | 'OLLAMA_TEXT_MODEL'
+      | 'OLLAMA_VLM_MODEL'
+      | 'WEB_LLM_BACKEND'
+      | 'WEB_WRITE_TOKEN'
+      | 'OLLAMA_TOKEN',
     value?: string
   ) => {
     if (value === undefined) delete process.env[key]
@@ -456,6 +465,7 @@ after(() => {
   restore('OLLAMA_VLM_MODEL', savedEnv.vlmModel)
   restore('WEB_LLM_BACKEND', savedEnv.backend)
   restore('WEB_WRITE_TOKEN', savedEnv.token)
+  restore('OLLAMA_TOKEN', savedEnv.ollamaToken)
 })
 
 async function callScript(
@@ -743,6 +753,46 @@ test('analyze-frames returns 503 llm_unavailable instead of fake analysis when O
     assert.equal(res.body.error, 'llm_unavailable')
     assert.match(String(res.body.detail), /Ollama VLM/)
     assert.equal('analysis' in res.body, false)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('analyze-frames sends X-Relay-Token only when OLLAMA_TOKEN is set (#120)', async () => {
+  const realFetch = globalThis.fetch
+  const seen: Array<string | null> = []
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push(new Headers(init?.headers).get('X-Relay-Token'))
+    return new Response(JSON.stringify({ model: 'vlm-test-model', response: JSON.stringify(FRAME_ANALYSIS_JSON) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+  }) as typeof fetch
+  try {
+    const noToken = await callGeminiPath('/api/gemini/analyze-frames', 'POST', FRAMES_BODY)
+    assert.equal(noToken.status, 200)
+    process.env.OLLAMA_TOKEN = 'relay-secret'
+    const withToken = await callGeminiPath('/api/gemini/analyze-frames', 'POST', FRAMES_BODY)
+    assert.equal(withToken.status, 200)
+    assert.deepEqual(seen, [null, 'relay-secret'])
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('analyze-frames relay 401 surfaces as 503 llm_unavailable (#120)', async () => {
+  process.env.OLLAMA_TOKEN = 'wrong-token'
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: 'unauthorized' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' }
+    })) as typeof fetch
+  try {
+    const res = await callGeminiPath('/api/gemini/analyze-frames', 'POST', FRAMES_BODY)
+    assert.equal(res.status, 503)
+    assert.equal(res.body.error, 'llm_unavailable')
+    assert.match(String(res.body.detail), /401/)
   } finally {
     globalThis.fetch = realFetch
   }

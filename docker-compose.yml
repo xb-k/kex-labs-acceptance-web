@@ -16,6 +16,9 @@ services:
       # Studio ollama (#87): NAS has no GPU; the URL points at the studio
       # tailnet relay (100.92.106.101:11437) and comes from .env.
       OLLAMA_URL: ${OLLAMA_URL:-http://127.0.0.1:11434}
+      # Studio relay shared secret (#120): required when OLLAMA_URL points at
+      # the relay (…:11437), sent as `X-Relay-Token`. Empty = local loopback.
+      OLLAMA_TOKEN: ${OLLAMA_TOKEN:-}
       # Studio intake bridge (Gitea #84): server-side proxy writes jobs/inbox on
       # the studio host. The token is the studio's WEB_WRITE_TOKEN; compose
       # fails closed if it is missing rather than starting a write-open web.

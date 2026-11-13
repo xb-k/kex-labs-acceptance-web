@@ -195,6 +195,8 @@ curl -X PATCH -H 'Content-Type: application/json' -H "X-Web-Token: $WEB_WRITE_TO
 | `PORT` / `HOST` | 监听端口/地址 | `8088` / `0.0.0.0` |
 | `WEB_DIST_DIR` | 前端产物目录 | `web/dist` |
 | `COMFYUI_URL` | 健康探针地址 | `http://127.0.0.1:8188` |
+| `OLLAMA_URL` | Ollama 地址；NAS 上填 studio relay `http://100.92.106.101:11437`（studio 本机仅 loopback） | `http://127.0.0.1:11434` |
+| `OLLAMA_TOKEN` | relay 共享密钥，所有 Ollama 请求带 `X-Relay-Token`；仅当非空时发送（loopback 直连不需要） | — |
 | `KEX_REPO_ROOT` | `/api/flow`、`/api/contract`、`/media/kex` 读取的 kex-labs-video 仓库根（只读） | `<DATA_ROOT>/kex-repo`（缺失 → `available:false`） |
 | `KEX_LOG_DIR` | `/api/flow` 读取 worker 日志的目录 | `~/Library/Logs/kexlabs-video`（缺失 → `logs.worker.lines:[]`） |
 

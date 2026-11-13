@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { formatHistoricalKnowledgeBrief, matchHistoricalKnowledge } from './historical-kb'
+import { ollamaFetch } from './ollama'
 import {
   agentDiscoverAndSyncGiteaTemplates,
   configureTemplateAutoSyncScheduler,
@@ -916,7 +917,7 @@ async function requestOllamaFrameAnalysis(
   const model = resolveOllamaVlmModel()
   let res: Response
   try {
-    res = await fetch(`${url}/api/generate`, {
+    res = await ollamaFetch(`${url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -962,7 +963,7 @@ async function generateScriptWithOllama(prompt: string): Promise<{
   const model = resolveOllamaTextModel()
   let res: Response
   try {
-    res = await fetch(`${url}/api/generate`, {
+    res = await ollamaFetch(`${url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
