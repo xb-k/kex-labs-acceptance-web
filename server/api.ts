@@ -58,6 +58,7 @@ import {
   type StudioContext
 } from './studio'
 import { handleAgentsRoute } from './agents'
+import { handleAgentLibraryRoute } from './agent-sync'
 import { handleDecisionsRoute } from './decisions'
 import { handleGeminiRoute } from './gemini'
 import { ollamaFetch } from './ollama'
@@ -4456,6 +4457,16 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       readJson,
       atomicWriteJson,
       authorizeWrite: (r) => authorizeTaskWrite(r)
+    })
+    return
+  }
+
+  if (pathname === '/api/agents/sync' || pathname === '/api/agents/library') {
+    await handleAgentLibraryRoute(req, res, url, pathname, {
+      dataRoot: DATA_ROOT,
+      authorize: (r) => authorizeTaskWrite(r),
+      sendJson,
+      env: process.env
     })
     return
   }
