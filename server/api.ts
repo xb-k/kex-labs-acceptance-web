@@ -111,8 +111,35 @@ const ISSUE_WRITE_DISABLED = ['0', 'false', 'off'].includes(
   (process.env.WEB_ISSUE_WRITE ?? '').trim().toLowerCase()
 )
 
-/** `WEB_ISSUE_TOKEN` (when set) is required verbatim in `X-Web-Token` for writes. */
-const ISSUE_TOKEN = process.env.WEB_ISSUE_TOKEN || null
+/**
+ * `POST /api/issues` write guard (#124): `WEB_ISSUE_TOKEN` set → exact
+ * `X-Web-Token` (401 otherwise); unset → same-origin browser only (403) with a
+ * per-IP budget of 10 creates/hour (429). See `authorizeIssueWrite`.
+ */
+export const ISSUE_CREATE_LIMIT_PER_HOUR = 10
+export const ISSUE_CREATE_WINDOW_MS = 60 * 60 * 1000
+/** Whole JSON request body cap for issue creation (413 above this). */
+export const ISSUE_BODY_MAX_BYTES = 20 * 1024
+export const ISSUE_TITLE_MAX = 200
+/** Only labels the board knows how to render/aggregate may be attached. */
+export const ISSUE_LABEL_WHITELIST: readonly string[] = [
+  'P0',
+  'P1',
+  'P2',
+  'P3',
+  'A轨',
+  'B轨',
+  '双轨',
+  'source/acceptance',
+  'status/pending',
+  'status/running',
+  'status/blocked',
+  'status/done',
+  'rail/A',
+  'rail/B',
+  'rail/双轨'
+]
+const issueCreateHits = new Map<string, number[]>()
 
 /**
  * Issue backlog source: `gitea` (default, see `gitea.ts`) or `files` (explicit
@@ -1824,6 +1851,53 @@ function isSameOriginRequest(req: IncomingMessage): boolean {
   return sameHost(referer)
 }
 
+/** Clear the per-IP create budget (tests only). */
+export function resetIssueWriteRateLimit(): void {
+  issueCreateHits.clear()
+}
+
+/** Client IP for the create budget; `serve.ts` preserves the public address. */
+function issueClientKey(req: IncomingMessage): string {
+  const forwarded = req.headers['x-forwarded-for']
+  const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)
+    ?.split(',')[0]
+    ?.trim()
+  return first || req.socket?.remoteAddress || 'unknown'
+}
+
+/**
+ * `POST /api/issues` guard (#124), shared by the Gitea and `files` branches:
+ *  - `WEB_ISSUE_TOKEN` set → exact `X-Web-Token` (401 otherwise), no rate limit;
+ *  - unset → same-origin browser request (403 otherwise) and at most
+ *    `ISSUE_CREATE_LIMIT_PER_HOUR` creates per client IP within one hour (429).
+ * Exported so both branches and the rate-limit table are unit-tested.
+ */
+export function authorizeIssueWrite(
+  req: IncomingMessage,
+  env: NodeJS.ProcessEnv = process.env,
+  now: number = Date.now()
+): { ok: true } | { ok: false; status: number; error: string } {
+  const token = (env.WEB_ISSUE_TOKEN ?? '').trim()
+  const raw = req.headers['x-web-token']
+  const provided = Array.isArray(raw) ? raw[0] : raw
+  if (token) {
+    if (provided !== token) return { ok: false, status: 401, error: 'invalid X-Web-Token' }
+    return { ok: true }
+  }
+  if (!isSameOriginRequest(req)) {
+    return { ok: false, status: 403, error: 'same-origin browser request or X-Web-Token required' }
+  }
+  const key = issueClientKey(req)
+  const hits = (issueCreateHits.get(key) ?? []).filter((at) => now - at < ISSUE_CREATE_WINDOW_MS)
+  if (hits.length >= ISSUE_CREATE_LIMIT_PER_HOUR) {
+    issueCreateHits.set(key, hits)
+    return { ok: false, status: 429, error: 'too many issue creates: 10 per hour' }
+  }
+  hits.push(now)
+  issueCreateHits.set(key, hits)
+  return { ok: true }
+}
+
 /**
  * `PATCH /api/tasks/:id` guard (issue #105). Browsers never hold
  * `WEB_WRITE_TOKEN`, so the token is optional for the same-origin page:
@@ -2689,15 +2763,33 @@ function validateTaskPatch(body: any): { fields: Record<string, unknown> } | { e
   return { fields }
 }
 
-function readRequestBody(req: IncomingMessage): Promise<any> {
+/**
+ * Read + parse a JSON request body. `maxBytes` caps the raw UTF-8 payload;
+ * over-limit bodies reject with `code: 'PAYLOAD_TOO_LARGE'` so callers can map
+ * them to 413 instead of a generic 400 (`POST /api/issues`, #124).
+ */
+export function readRequestBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<any> {
   return new Promise((resolve, reject) => {
-    let data = ''
-    req.setEncoding('utf8')
-    req.on('data', (chunk: string) => {
-      data += chunk
-      if (data.length > 64 * 1024) reject(new Error('body too large'))
+    const chunks: Buffer[] = []
+    let size = 0
+    let tooLarge = false
+    req.on('data', (chunk: Buffer | string) => {
+      const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+      size += buffer.length
+      if (size > maxBytes) {
+        tooLarge = true
+        return
+      }
+      chunks.push(buffer)
     })
     req.on('end', () => {
+      if (tooLarge) {
+        const error = new Error('body too large') as NodeJS.ErrnoException
+        error.code = 'PAYLOAD_TOO_LARGE'
+        reject(error)
+        return
+      }
+      const data = Buffer.concat(chunks).toString('utf8')
       if (!data.trim()) {
         reject(new Error('empty body'))
         return
@@ -3623,9 +3715,12 @@ export type IssueFields = {
   owner: string | null
   rail: string | null
   priority: string | null
+  /** Optional, already checked against `ISSUE_LABEL_WHITELIST` (#124). */
+  labels?: string[] | null
 }
 
-function validateIssue(body: any): { fields: IssueFields } | { error: string } {
+/** Shared by the Gitea and `files` create branches (#124 payload contract). */
+export function validateIssue(body: any): { fields: IssueFields } | { error: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { error: 'body: 必须是 JSON 对象' }
   }
@@ -3633,7 +3728,7 @@ function validateIssue(body: any): { fields: IssueFields } | { error: string } {
     return { error: 'title: 必填' }
   }
   const title = body.title.trim()
-  if (title.length > 120) return { error: 'title: 长度需 1..120' }
+  if (title.length > ISSUE_TITLE_MAX) return { error: `title: 长度需 1..${ISSUE_TITLE_MAX}` }
   const optional = (key: 'description' | 'owner' | 'rail' | 'priority'): string | null | { error: string } => {
     const value = body[key]
     if (value === undefined || value === null) return null
@@ -3661,7 +3756,22 @@ function validateIssue(body: any): { fields: IssueFields } | { error: string } {
   if (values.priority && !ISSUE_PRIORITIES.includes(values.priority)) {
     return { error: 'priority: 只能是 P0/P1/P2/P3' }
   }
-  return { fields: { title, ...values } }
+  let labels: string[] | null = null
+  if (body.labels !== undefined && body.labels !== null) {
+    if (!Array.isArray(body.labels)) return { error: 'labels: 必须是字符串数组' }
+    if (body.labels.length > 10) return { error: 'labels: 最多 10 个' }
+    const seen: string[] = []
+    for (const raw of body.labels) {
+      if (typeof raw !== 'string') return { error: 'labels: 必须是字符串数组' }
+      const name = raw.trim()
+      if (!ISSUE_LABEL_WHITELIST.includes(name)) {
+        return { error: `labels: 不支持的标签 ${name.slice(0, 40)}` }
+      }
+      if (!seen.includes(name)) seen.push(name)
+    }
+    labels = seen.length ? seen : null
+  }
+  return { fields: { title, ...values, ...(labels ? { labels } : {}) } }
 }
 
 /** Comment body limits (#110): 1..8000 characters after trimming. */
@@ -3697,14 +3807,19 @@ async function handleIssuePost(req: IncomingMessage, res: ServerResponse) {
     sendJson(res, 403, { error: 'issues write disabled' })
     return
   }
-  if (ISSUE_TOKEN !== null && req.headers['x-web-token'] !== ISSUE_TOKEN) {
-    sendJson(res, 401, { error: 'invalid X-Web-Token' })
+  const auth = authorizeIssueWrite(req)
+  if (!auth.ok) {
+    sendJson(res, auth.status, { error: auth.error })
     return
   }
   let body: any
   try {
-    body = await readRequestBody(req)
+    body = await readRequestBody(req, ISSUE_BODY_MAX_BYTES)
   } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'PAYLOAD_TOO_LARGE') {
+      sendJson(res, 413, { error: `body too large: max ${ISSUE_BODY_MAX_BYTES} bytes` })
+      return
+    }
     sendJson(res, 400, { error: issueErrorText(err) })
     return
   }
@@ -3960,14 +4075,19 @@ async function handleGiteaIssuePost(req: IncomingMessage, res: ServerResponse) {
     sendJson(res, 403, { error: 'issues write disabled' })
     return
   }
-  if (ISSUE_TOKEN !== null && req.headers['x-web-token'] !== ISSUE_TOKEN) {
-    sendJson(res, 401, { error: 'invalid X-Web-Token' })
+  const auth = authorizeIssueWrite(req)
+  if (!auth.ok) {
+    sendJson(res, auth.status, { error: auth.error })
     return
   }
   let body: any
   try {
-    body = await readRequestBody(req)
+    body = await readRequestBody(req, ISSUE_BODY_MAX_BYTES)
   } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'PAYLOAD_TOO_LARGE') {
+      sendJson(res, 413, { error: `body too large: max ${ISSUE_BODY_MAX_BYTES} bytes` })
+      return
+    }
     sendJson(res, 400, { error: issueErrorText(err) })
     return
   }

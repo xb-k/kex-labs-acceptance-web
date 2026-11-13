@@ -183,7 +183,7 @@ curl -X PATCH -H 'Content-Type: application/json' -H "X-Web-Token: $WEB_WRITE_TO
 | `STUDIO_INTAKE_URL` | studio intake 服务地址（#84 桥） | `http://100.92.106.101:8090` |
 | `WEB_ISSUE_ROOT` | **仅 `WEB_ISSUES_SOURCE=files`（deprecated 回退）**：本地 issues 扫描/写入根 | `WEB_DATA_ROOT` |
 | `WEB_ISSUE_WRITE` | 设为 `0`/`false`/`off` 时 `POST /api/issues` 返回 403（两种数据源都生效） | 开启 |
-| `WEB_ISSUE_TOKEN` | 配置后 `POST /api/issues` 必须带同值 `X-Web-Token`，否则 401（两种数据源都生效） | 未设 = 不校验 |
+| `WEB_ISSUE_TOKEN` | 配置后 `POST /api/issues` 必须带同值 `X-Web-Token`，否则 401（两种数据源都生效） | 未设 = 仅同源浏览器请求 + 每 IP 10 次/小时（超限 429） |
 | `WEB_ISSUES_SOURCE` | `gitea`（默认，直连 Gitea API）或 `files`（显式回退：扫描本地 `issue-N/`） | `gitea` |
 | `WEB_TASKS_SOURCE` | `gitea`（默认，任务读 Gitea task issue）或 `files`（显式回退：读 `WEB_PLAN_FILE`） | `gitea` |
 | `WEB_GITEA_SYNC_TOKEN` | reconcile 专用 token（与 `WEB_WRITE_TOKEN` 等价）；两者都未设时 reconcile 仅接受 loopback | — |
@@ -282,7 +282,7 @@ curl -s 'http://127.0.0.1:8095/api/issues?state=all&limit=50' | jq '.count'
 | `GET /api/overview` | 工作台总览：任务/判定计数、告警、运行中/待办、系统与交付摘要（`meta.planSource`/`jobsSource`） |
 | `GET /api/deliveries` | 交付列表（成片、海报、报告、评分、gate、时长） |
 | `GET /api/issues?state=open\|all\|closed&limit=50&page=1` | **默认 Gitea 数据源**：`GET /api/v1/repos/<repo>/issues?type=issues&sort=recentupdate&direction=desc`，默认 `state=open`；返回 `{available,items,count,latest,meta:{source:"gitea",repo,web_url,counts:{open,closed,total},fetched_at}}`；字段映射见下节。未配置/不可达/401 → 200 `available:false`（不回退本地，避免与 Gitea 不一致） |
-| `POST /api/issues` | **默认 Gitea 数据源**：在 Gitea 新建 issue（201，`{item,meta}`），负责人/轨道/优先级写进 body 的尾部块；不写本地 `issue-N/`。校验失败 400、写关闭 403、token 不符 401、未配置 503、Gitea 失败 502 |
+| `POST /api/issues` | **默认 Gitea 数据源**：在 Gitea 新建 issue（201，`{item,meta}`），负责人/轨道/优先级写进 body 的尾部块；不写本地 `issue-N/`。校验失败 400、写关闭 403、token 不符 401、未配置 503、Gitea 失败 502；请求体超过 20KB → 413、同源无 token 时每 IP 10 次/小时超限 → 429；`title` ≤200 字符，`labels` 仅接受白名单（`P0`~`P3`、`A轨`/`B轨`/`双轨`、`status/*` 等，最多 10 个） |
 | `GET /api/jobs/:jobId` | 单个 job 详情（判据 + 产物） |
 | `GET /api/tasks/:id` | 任务详情（任务 + 判据 + 证据 + 产物 + 日志 + 历史/快照），不存在 404 |
 | `PATCH /api/tasks/:id` | 改任务字段（需 `X-Web-Token`）：Gitea 模式改 issue meta/标签/state（`source:"gitea"`），files/Postgres 模式改 `tasks.json`/DB |

@@ -581,9 +581,19 @@ function buildBody(fields: IssueFields): string {
 export async function createIssue(fields: IssueFields): Promise<GiteaIssueItem> {
   if (!giteaConfigured()) throw new GiteaError('not configured')
   const { repo } = giteaConfig()
+  const payload: Record<string, unknown> = { title: fields.title, body: buildBody(fields) }
+  // #124: labels are whitelisted upstream; forward only names the repo knows
+  // (unknown labels are dropped rather than auto-created for this endpoint).
+  if (fields.labels?.length) {
+    const known = await repoLabelMap()
+    const ids = fields.labels
+      .map((name) => known.get(name))
+      .filter((id): id is number => typeof id === 'number')
+    if (ids.length) payload.labels = ids
+  }
   const { data } = await requestJson(`/api/v1/repos/${repo}/issues`, {
     method: 'POST',
-    body: JSON.stringify({ title: fields.title, body: buildBody(fields) })
+    body: JSON.stringify(payload)
   })
   invalidateGiteaCache()
   if (!data || typeof data !== 'object') throw new GiteaError('upstream error')

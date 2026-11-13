@@ -88,16 +88,9 @@ export function ProductionTrackerPage() {
   const jobs = flow.data?.jobs ?? []
   const job = flow.data?.job ?? null
 
-  const activeBrief = useMemo(() => {
-    const items = briefsState.data?.items ?? []
-    const matched =
-      job?.id.includes('coffee')
-        ? items.find((b) => b.id === 'brief_coffee_ad_001')
-        : job?.id.includes('vlog')
-          ? items.find((b) => b.id === 'brief_vlog_cafe_002')
-          : undefined
-    return matched ?? items[0] ?? null
-  }, [briefsState.data?.items, job?.id])
+  // #122：/api/studio/briefs 已按 updated_at 倒序，直接取最近更新的 Brief；
+  // 不再按 job id 特判残留 mock brief（brief_coffee_ad_001 / brief_vlog_cafe_002）。
+  const activeBrief = briefsState.data?.items?.[0] ?? null
 
   const scriptStatus = activeBrief?.polished ? 'done' : undefined
 
