@@ -135,6 +135,17 @@ export type AigcPayloadInput = {
 }
 
 /**
+ * #150：A 轨是否可以提交 —— 素材（上传 / 绝对路径）**或**关键帧二选一。
+ * 仅关键帧时后端会用 wan_i2v 先生成基础镜头，再走 A~F。
+ */
+export function hasAigcSource(input: Pick<AigcPayloadInput, 'input' | 'uploadId' | 'keyframe'>): boolean {
+  return Boolean((input.input ?? '').trim() || input.uploadId || input.keyframe)
+}
+
+/** #150：无素材、仅关键帧时展示的提交提示。 */
+export const KEYFRAME_ONLY_HINT = '将用关键帧生成基础镜头，预计 15–25 分钟'
+
+/**
  * A 轨提交 payload。未选关键帧时**不含** `keyframe_asset` 键，保持旧请求逐字节不变。
  */
 export function buildAigcJobPayload(input: AigcPayloadInput): Record<string, unknown> {

@@ -1358,12 +1358,22 @@ function validateCreateJob(
       }
     }
   }
+  const railRaw = hasKey(body, 'rail') ? body.rail : 'A'
+  if (typeof railRaw !== 'string' || !RAILS.has(railRaw as Rail)) {
+    return { ok: false, status: 400, error: 'rail: 需为 A / B' }
+  }
+  const rail = railRaw as Rail
   const hasInput = hasKey(body, 'input') && body.input !== null && body.input !== undefined
   const hasUpload = hasKey(body, 'upload_id') && body.upload_id !== null && body.upload_id !== undefined
+  const hasKeyframe =
+    hasKey(body, 'keyframe_asset') && body.keyframe_asset !== null && body.keyframe_asset !== undefined
   if (hasInput && hasUpload) {
     return { ok: false, status: 400, error: 'input 与 upload_id 二选一' }
   }
-  if (!hasInput && !hasUpload) {
+  // #150: A 轨 aigc 任务可以不带 input/upload —— 只要有关键帧，intake 会先用
+  // wan_i2v 按关键帧生成基础镜头，再走 A~F。B 轨与无关键帧的任务规则不变。
+  const keyframeOnly = type === 'aigc' && rail === 'A' && hasKeyframe
+  if (!hasInput && !hasUpload && !keyframeOnly) {
     return { ok: false, status: 400, error: 'input 或 upload_id 必填' }
   }
   let input: string | undefined
@@ -1373,15 +1383,11 @@ function validateCreateJob(
       return { ok: false, status: 400, error: 'input: 需为 studio 上已存在的绝对路径' }
     }
     input = body.input
-  } else {
+  } else if (hasUpload) {
     if (typeof body.upload_id !== 'string' || !UPLOAD_ID_RE.test(body.upload_id)) {
       return { ok: false, status: 400, error: 'upload_id: 非法' }
     }
     uploadId = body.upload_id
-  }
-  const rail = hasKey(body, 'rail') ? body.rail : 'A'
-  if (typeof rail !== 'string' || !RAILS.has(rail as Rail)) {
-    return { ok: false, status: 400, error: 'rail: 需为 A / B' }
   }
   let id: string | undefined
   if (hasKey(body, 'id')) {
@@ -1462,10 +1468,14 @@ async function submitJob(
   // #86d: video jobs (aigc / optimize) must forward `type` + `rail` too —
   // without them intake defaults to `aigc` / rail A and B-track optimize jobs
   // were misrouted into A-track i2v (86c F-01/F-02).
+  // #150: keyframe-only jobs omit the `input` key entirely (not `input: undefined`)
+  // so intake sees a source-less A-track job and generates the base shot itself.
   const payload: Record<string, unknown> =
     job.type === 'image'
       ? { type: 'image', image: job.image }
-      : { type: job.type, rail: job.rail, input: job.input }
+      : job.input
+        ? { type: job.type, rail: job.rail, input: job.input }
+        : { type: job.type, rail: job.rail }
   if (job.id) {
     payload.id = job.id
     payload.job = job.id

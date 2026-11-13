@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { ImageJobTracker } from './components/ImageWorkbench'
 import {
   IMAGE_SIZES,
+  KEYFRAME_ONLY_HINT,
   buildAigcJobPayload,
   buildImageJobPayload,
   buildJobDeletePlan,
@@ -18,6 +19,7 @@ import {
   imageWaitStage,
   galleryPrimaryImage,
   galleryStatusLabel,
+  hasAigcSource,
   imageActionState,
   referencePanelState,
   validateCoverTarget,
@@ -152,6 +154,28 @@ test('A 轨 payload：选关键帧时透传，未选时不含该键', () => {
   const absolute = buildAigcJobPayload({ briefId: null, input: '/studio/src.mp4', uploadId: 'ignored' })
   assert.equal(absolute.input, '/studio/src.mp4')
   assert.equal('upload_id' in absolute, false)
+})
+
+/* #150：无素材 + 关键帧 = 可提交；payload 不含 input/upload_id。 */
+test('#150 A 轨仅关键帧：提交按钮可用，payload 不带 input', () => {
+  const keyframe = { source_job: 'imgjob-1', name: 'image-01.png' }
+  assert.equal(hasAigcSource({ input: '', uploadId: null, keyframe }), true)
+  assert.equal(hasAigcSource({ input: '', uploadId: null }), false)
+  assert.equal(hasAigcSource({ input: '/studio/src.mp4' }), true)
+  assert.equal(hasAigcSource({ input: '', uploadId: 'up-12345678' }), true)
+
+  const payload = buildAigcJobPayload({ briefId: null, keyframe })
+  assert.deepEqual(payload, {
+    type: 'aigc',
+    rail: 'A',
+    brief_id: null,
+    keyframe_asset: { source_job: 'imgjob-1', name: 'image-01.png' }
+  })
+  assert.equal('input' in payload, false)
+  assert.equal('upload_id' in payload, false)
+  // 提示文案要同时说清「用关键帧生成」与「耗时量级」。
+  assert.match(KEYFRAME_ONLY_HINT, /关键帧生成基础镜头/)
+  assert.match(KEYFRAME_ONLY_HINT, /15–25 分钟/)
 })
 
 test('gallery 映射：主图 / 状态标签 / 元信息', () => {

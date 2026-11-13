@@ -383,6 +383,58 @@ test('aigc job forwards keyframe_asset as {source_job, name}', async () => {
   assert.equal(hit?.body.input, '/studio/jobs/j1/output/source.mp4')
 })
 
+// #150: A 轨仅关键帧 —— 无 input/upload 时允许提交，intake 先用 wan_i2v 生成基础镜头。
+test('#150 A 轨无素材但带关键帧 → 201，转发不带 input，保留 keyframe_asset', async () => {
+  const r = await fetch(`${base}/api/studio/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'aigc',
+      rail: 'A',
+      keyframe_asset: { source_job: 'web-20261114032741-43d3b9', name: 'image-01.png' }
+    })
+  })
+  assert.equal(r.status, 201)
+  const hit = hits.filter((h) => h.method === 'POST' && h.url === '/intake/jobs').at(-1)
+  assert.equal(hit?.body.type, 'aigc')
+  assert.equal(hit?.body.rail, 'A')
+  assert.equal('input' in (hit?.body ?? {}), false, '关键帧任务不转发 input')
+  assert.equal('upload_id' in (hit?.body ?? {}), false)
+  assert.deepEqual(hit?.body.keyframe_asset, {
+    source_job: 'web-20261114032741-43d3b9',
+    name: 'image-01.png'
+  })
+})
+
+test('#150 无 input 且无 keyframe → 400（intake 不被调用）', async () => {
+  const before = hits.length
+  const r = await fetch(`${base}/api/studio/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'aigc', rail: 'A' })
+  })
+  assert.equal(r.status, 400)
+  const body = (await r.json()) as { error: string }
+  assert.match(body.error, /input 或 upload_id 必填/)
+  assert.equal(hits.length, before)
+})
+
+test('#150 B 轨即使带关键帧也不能省略 input → 400', async () => {
+  const before = hits.length
+  for (const body of [
+    { type: 'optimize', rail: 'B' },
+    { type: 'aigc', rail: 'B', keyframe_asset: { source_job: 'j1', name: 'pick.png' } }
+  ]) {
+    const r = await fetch(`${base}/api/studio/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    assert.equal(r.status, 400, JSON.stringify(body))
+  }
+  assert.equal(hits.length, before)
+})
+
 test('keyframe_asset with a path is rejected with 400', async () => {
   const before = hits.length
   for (const name of ['/abs/pick.png', '..%2Fpick.png', 'pick.txt']) {

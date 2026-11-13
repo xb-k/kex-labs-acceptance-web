@@ -14,7 +14,7 @@ import { VideoOptimizeWorkbench } from '../components/studio/VideoOptimizeWorkbe
 import { AsyncStatusLine, ToastHost } from '../components/ui'
 import { formatClockMs, formatSizeBytes } from '../format'
 import { useToast } from '../hooks'
-import { buildAigcJobPayload } from '../image-workbench'
+import { KEYFRAME_ONLY_HINT, buildAigcJobPayload, hasAigcSource } from '../image-workbench'
 import { buildOptimizeJobPayload, type UploadProbeResponse } from '../studio-probe'
 import type {
   StudioBrief,
@@ -436,8 +436,8 @@ export function StudioPage() {
       setFormError('素材上传未完成：请先点「继续上传」补齐分块，或更换文件。')
       return
     }
-    if (!absolute && !upload) {
-      setFormError('请先选择并上传素材，或在「高级」里填写 studio 上已存在的绝对路径。')
+    if (!hasAigcSource({ input: absolute, uploadId: upload?.uploadId ?? null, keyframe: keyframeAsset })) {
+      setFormError('请先选择并上传素材、填写 studio 上已存在的绝对路径，或从生图工作台选择一张关键帧。')
       focusSource()
       return
     }
@@ -768,6 +768,22 @@ export function StudioPage() {
                     >
                       移除
                     </button>
+                  </div>
+                )}
+
+                {keyframeAsset && !path.trim() && !readyUpload && (
+                  <div
+                    className="flex items-center gap-2 rounded-[10px] bg-[#F5F5F7] px-3 py-2 text-[11px] leading-relaxed text-apple-subtext ring-1 ring-inset ring-black/[0.06]"
+                    role="status"
+                    data-testid="studio-keyframe-only-hint"
+                  >
+                    <span
+                      className="h-2 w-2 shrink-0 rounded-full bg-apple-blue animate-pulse motion-reduce:animate-none"
+                      aria-hidden="true"
+                    />
+                    <span className="min-w-0 break-words">
+                      未选择素材：{KEYFRAME_ONLY_HINT}。
+                    </span>
                   </div>
                 )}
 
