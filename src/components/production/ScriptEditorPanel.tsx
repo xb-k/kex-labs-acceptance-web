@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { HttpError, patchJson, postJson, useJson } from '../../api'
+import { HttpError, isAbortError, patchJson, postJson, useJson } from '../../api'
 import { formatClockMs } from '../../format'
 import { Link } from '../../router'
 import type {
@@ -16,6 +16,7 @@ import { SelectMenu } from '../SelectMenu'
 import { ASPECTS } from '../studio-ui'
 import { Copy, Download, ExternalLink, Refresh, Search, Shield, Sliders, Sparkles } from '../icons'
 import { IssueMarkdown } from '../IssueMarkdown'
+import { AsyncStatusLine } from '../ui'
 import {
   buildExportMarkdown,
   buildExportPlainText,
@@ -125,6 +126,13 @@ export function ScriptEditorPanel({
 
   const [generating, setGenerating] = useState(false)
   const [activeModeLabel, setActiveModeLabel] = useState<string>('编写剧本')
+  const [generateStartedAt, setGenerateStartedAt] = useState<number | null>(null)
+  const [generateStage, setGenerateStage] = useState(0)
+  const [syncStartedAt, setSyncStartedAt] = useState<number | null>(null)
+  const [scheduleStartedAt, setScheduleStartedAt] = useState<number | null>(null)
+  const scriptAbortRef = useRef<AbortController | null>(null)
+  const scriptAbortReasonRef = useRef<'cancel' | 'timeout' | null>(null)
+  const scriptTimeoutRef = useRef<number | null>(null)
   const [syncingBrief, setSyncingBrief] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [metaInfo, setMetaInfo] = useState<{ model: string; elapsedMs: number } | null>(null)
@@ -170,6 +178,14 @@ export function ScriptEditorPanel({
   const activeProfile = useMemo(
     () => directorProfiles.find((p) => p.id === selectedProfileId) ?? directorProfiles[0],
     [directorProfiles, selectedProfileId]
+  )
+
+  useEffect(
+    () => () => {
+      scriptAbortRef.current?.abort()
+      if (scriptTimeoutRef.current !== null) window.clearTimeout(scriptTimeoutRef.current)
+    },
+    []
   )
 
   useEffect(() => {
@@ -243,7 +259,12 @@ export function ScriptEditorPanel({
     const targetEpisodeMode = overrides?.episodeModeVal ?? episodeMode
     const targetStoryEra = overrides?.storyEraVal ?? storyEra
 
+    const controller = new AbortController()
+    scriptAbortRef.current = controller
+    scriptAbortReasonRef.current = null
     setGenerating(true)
+    setGenerateStartedAt(Date.now())
+    setGenerateStage(0)
     setActiveModeLabel(
       useHistoricalGrounding
         ? '检索本地历史知识库'
@@ -284,6 +305,13 @@ export function ScriptEditorPanel({
                 : '编写分场剧本'
       )
 
+      setGenerateStage(1)
+      const timeoutId = window.setTimeout(() => {
+        scriptAbortReasonRef.current = 'timeout'
+        controller.abort()
+      }, 60_000)
+      scriptTimeoutRef.current = timeoutId
+
       const res = await postJson<GeminiScriptResponse>('/api/gemini/script', {
         prompt: cleanPrompt,
         template_id: targetTemplate.id,
@@ -311,11 +339,13 @@ export function ScriptEditorPanel({
                 }))
               }
             : undefined
-      })
+      }, controller.signal)
 
+      setGenerateStage(2)
       setGenerated(res.script)
       setEditedMarkdown(res.script.markdown)
       setMetaInfo({ model: res.model, elapsedMs: res.elapsed_ms })
+      setGenerateStartedAt(null)
       if (viewMode === 'edit') setViewMode('scenes')
       if (mode === 'optimize') {
         setTemplateFeedback({
@@ -334,21 +364,50 @@ export function ScriptEditorPanel({
             : `已调用 AI 生成「${targetTemplate.category}」剧本《${res.script.title}》`
       )
     } catch (err) {
-      let msg = err instanceof Error ? err.message : '调用 AI 生成剧本失败'
-      if (err instanceof HttpError && err.payload && typeof err.payload === 'object') {
-        const rec = err.payload as { message?: unknown; error?: unknown }
-        if (typeof rec.message === 'string' && rec.message.trim()) {
-          msg = rec.message
-        } else if (typeof rec.error === 'string' && rec.error.trim()) {
-          msg = rec.error
+      if (isAbortError(err)) {
+        if (scriptAbortReasonRef.current === 'timeout') {
+          const msg = '模型响应超时（60 秒），可点击「重试生成」。'
+          setErrorMsg(msg)
+          onNotify?.(msg)
+        } else {
+          setErrorMsg(null)
+          onNotify?.('已取消剧本生成')
         }
+      } else {
+        let msg = err instanceof Error ? err.message : '调用 AI 生成剧本失败'
+        if (err instanceof HttpError && err.payload && typeof err.payload === 'object') {
+          const rec = err.payload as { message?: unknown; error?: unknown; detail?: unknown }
+          if (typeof rec.message === 'string' && rec.message.trim()) {
+            msg = rec.message
+          } else if (typeof rec.error === 'string' && rec.error.trim()) {
+            msg = rec.error === 'llm_unavailable' ? '本地模型不可用（llm_unavailable）' : rec.error
+          }
+          if (typeof rec.detail === 'string' && rec.detail.trim()) {
+            msg = `${msg}（${rec.detail.trim()}）`
+          }
+        } else if (err instanceof Error && err.message) {
+          msg = err.message
+        }
+        setErrorMsg(msg)
+        onNotify?.(msg)
       }
-      setErrorMsg(msg)
-      onNotify?.(msg)
     } finally {
+      if (scriptTimeoutRef.current !== null) {
+        window.clearTimeout(scriptTimeoutRef.current)
+        scriptTimeoutRef.current = null
+      }
+      scriptAbortRef.current = null
+      scriptAbortReasonRef.current = null
+      setGenerateStartedAt(null)
       setGenerating(false)
       onProcessingChange?.(false)
     }
+  }
+
+  const cancelScriptRequest = () => {
+    if (!scriptAbortRef.current) return
+    scriptAbortReasonRef.current = 'cancel'
+    scriptAbortRef.current.abort()
   }
 
   const handleSyncFromSource = async (
@@ -358,6 +417,7 @@ export function ScriptEditorPanel({
     if (syncingSource) return
     const isGitea = source === 'gitea' || source === 'gitea_discover'
     setSyncingSource(isGitea ? 'gitea' : 'github')
+    setSyncStartedAt(Date.now())
     try {
       const res = await postJson<SyncTemplatesResponse>('/api/gemini/script-templates/sync', {
         source,
@@ -387,12 +447,14 @@ export function ScriptEditorPanel({
       onNotify?.(err instanceof Error ? err.message : '提示词库拉取失败')
     } finally {
       setSyncingSource(null)
+      setSyncStartedAt(null)
     }
   }
 
   const handleUpdateSchedule = async (patch: { autoSyncEnabled?: boolean; intervalHours?: number }) => {
     if (updatingSchedule) return
     setUpdatingSchedule(true)
+    setScheduleStartedAt(Date.now())
     try {
       const res = await patchJson<{ ok: boolean; sync: TemplateSyncState }>(
         '/api/gemini/script-templates/schedule',
@@ -408,6 +470,7 @@ export function ScriptEditorPanel({
       onNotify?.(err instanceof Error ? err.message : '更新同步策略失败')
     } finally {
       setUpdatingSchedule(false)
+      setScheduleStartedAt(null)
     }
   }
 
@@ -845,6 +908,19 @@ export function ScriptEditorPanel({
                 </button>
               </div>
             </div>
+
+            {(syncingSource !== null || updatingSchedule) && (
+              <AsyncStatusLine
+                testId="script-template-sync-status"
+                label={
+                  syncingSource !== null
+                    ? `正在同步 ${syncingSource === 'gitea' ? 'Gitea 提示词库' : 'GitHub 提示词库'}`
+                    : '正在保存定时同步策略'
+                }
+                startedAt={syncingSource !== null ? syncStartedAt : scheduleStartedAt}
+                detail="最长 30 秒"
+              />
+            )}
 
             {syncState?.giteaSource?.discoveredLocations &&
               syncState.giteaSource.discoveredLocations.length > 0 && (
@@ -1295,6 +1371,15 @@ export function ScriptEditorPanel({
 
           {generating ? (
             <div className="mt-4 space-y-3" aria-busy="true" aria-label="剧本生成中">
+              <AsyncStatusLine
+                testId="script-generate-status"
+                label={`正在${activeModeLabel}`}
+                startedAt={generateStartedAt}
+                stages={['提交请求', '模型生成', '解析分场数据']}
+                stage={generateStage}
+                detail="最长 60 秒"
+                onCancel={cancelScriptRequest}
+              />
               <div className="h-5 w-48 animate-pulse rounded bg-black/[0.06]" />
               <div className="h-14 animate-pulse rounded-xl bg-black/[0.04]" />
               <div className="h-24 animate-pulse rounded-xl bg-black/[0.04]" />

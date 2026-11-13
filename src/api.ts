@@ -346,13 +346,15 @@ export function setManualVerify(
 async function requestJson<T>(
   method: 'POST' | 'PATCH' | 'DELETE',
   url: string,
-  body?: unknown
+  body?: unknown,
+  signal?: AbortSignal
 ): Promise<T> {
   const res = await fetch(url, {
     method,
     ...(body === undefined
       ? {}
-      : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    ...(signal ? { signal } : {})
   })
   if (!res.ok) {
     let message = `HTTP ${res.status}`
@@ -375,13 +377,18 @@ async function requestJson<T>(
 }
 
 /** POST JSON；错误消息优先取后端的 `{ error }`，并保留状态码供调用方区分 401/403。 */
-export function postJson<T>(url: string, body: unknown): Promise<T> {
-  return requestJson<T>('POST', url, body)
+export function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  return requestJson<T>('POST', url, body, signal)
 }
 
 /** PATCH JSON；错误处理与 postJson 一致（#87 Brief 润色结果保存）。 */
-export function patchJson<T>(url: string, body: unknown): Promise<T> {
-  return requestJson<T>('PATCH', url, body)
+export function patchJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  return requestJson<T>('PATCH', url, body, signal)
+}
+
+/** #136 取消/超时请求：fetch abort 在浏览器抛 DOMException(name=AbortError)。 */
+export function isAbortError(err: unknown): boolean {
+  return Boolean(err && typeof err === 'object' && (err as { name?: unknown }).name === 'AbortError')
 }
 
 /** DELETE（#107 交付软删）；错误处理与 postJson 一致，供调用方区分 401/403/404。 */

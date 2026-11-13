@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getJson, postJson } from '../../api'
+import { HttpError, getJson, isAbortError, postJson } from '../../api'
 import { formatDuration, formatSizeBytes } from '../../format'
+import { AsyncStatusLine } from '../ui'
 import type {
   ExtractedFrame,
   FrameAnalysisResult,
@@ -19,6 +20,22 @@ import {
   Sparkles,
   Upload
 } from '../icons'
+
+/** #136：把后端 error/detail 原样带到等待行，不吞 503 llm_unavailable。 */
+function describeOptimizeError(err: unknown, fallback: string): string {
+  if (err instanceof HttpError) {
+    const body = err.payload as { error?: unknown; message?: unknown; detail?: unknown } | null
+    const base =
+      body && typeof body.message === 'string' && body.message.trim()
+        ? body.message
+        : body && typeof body.error === 'string' && body.error.trim()
+          ? `后端错误：${body.error}`
+          : err.message
+    const detail = body && typeof body.detail === 'string' && body.detail.trim() ? body.detail.trim() : ''
+    return detail ? `${base}（${detail}）` : base
+  }
+  return err instanceof Error && err.message ? err.message : fallback
+}
 
 const VIDEO_EXTS = ['.mp4', '.mov', '.mkv', '.webm', '.m4v']
 const MAX_LOCAL_OPTIMIZE_BYTES = 250 * 1024 * 1024
@@ -154,12 +171,16 @@ export function VideoOptimizeWorkbench({
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number>(1)
 
   const [analyzing, setAnalyzing] = useState(false)
+  const [analyzeStartedAt, setAnalyzeStartedAt] = useState<number | null>(null)
+  const analyzeAbortRef = useRef<AbortController | null>(null)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   const [analysis, setAnalysis] = useState<FrameAnalysisResult | null>(null)
   const [aiElapsedMs, setAiElapsedMs] = useState<number | null>(null)
 
   const [params, setParams] = useState<OptimizeParams>(DEFAULT_PARAMS)
   const [rendering, setRendering] = useState(false)
+  const [renderStartedAt, setRenderStartedAt] = useState<number | null>(null)
+  const renderAbortRef = useRef<AbortController | null>(null)
   const [renderError, setRenderError] = useState<string | null>(null)
   const [splitPct, setSplitPct] = useState(50)
 
@@ -243,21 +264,30 @@ export function VideoOptimizeWorkbench({
 
   const handleAnalyzeFrames = useCallback(async () => {
     if (!session) return
+    const controller = new AbortController()
+    analyzeAbortRef.current = controller
     setAnalyzing(true)
+    setAnalyzeStartedAt(Date.now())
     setAnalyzeError(null)
     try {
       const res = await postJson<{
         model: string
         elapsed_ms: number
         analysis: FrameAnalysisResult
-      }>('/api/gemini/analyze-frames', { sessionId: session.id })
+      }>('/api/gemini/analyze-frames', { sessionId: session.id }, controller.signal)
       setAnalysis(res.analysis)
       setAiElapsedMs(res.elapsed_ms)
       setSession((prev) => (prev ? { ...prev, ai_analysis: res.analysis } : prev))
       onNotify?.(`AI 画面拆解完成（耗时 ${(res.elapsed_ms / 1000).toFixed(1)}s）`, 'ok')
     } catch (err) {
-      setAnalyzeError(err instanceof Error ? err.message : 'AI 画面分析失败')
+      if (isAbortError(err)) {
+        onNotify?.('已取消 AI 画面拆解', 'info')
+      } else {
+        setAnalyzeError(describeOptimizeError(err, 'AI 画面分析失败'))
+      }
     } finally {
+      analyzeAbortRef.current = null
+      setAnalyzeStartedAt(null)
       setAnalyzing(false)
     }
   }, [session, onNotify])
@@ -276,12 +306,16 @@ export function VideoOptimizeWorkbench({
 
   const handleBeautifyRender = useCallback(async () => {
     if (!session) return
+    const controller = new AbortController()
+    renderAbortRef.current = controller
     setRendering(true)
+    setRenderStartedAt(Date.now())
     setRenderError(null)
     try {
       const updated = await postJson<OptimizeSession>(
         `/api/optimize/${encodeURIComponent(session.id)}/beautify`,
-        { params, ai_analysis: analysis }
+        { params, ai_analysis: analysis },
+        controller.signal
       )
       setSession(updated)
       onNotify?.(
@@ -289,11 +323,25 @@ export function VideoOptimizeWorkbench({
         'ok'
       )
     } catch (err) {
-      setRenderError(err instanceof Error ? err.message : 'FFmpeg 美化渲染失败')
+      if (isAbortError(err)) {
+        onNotify?.('已取消美化渲染', 'info')
+      } else {
+        setRenderError(describeOptimizeError(err, 'FFmpeg 美化渲染失败'))
+      }
     } finally {
+      renderAbortRef.current = null
+      setRenderStartedAt(null)
       setRendering(false)
     }
   }, [session, params, analysis, onNotify])
+
+  const cancelAnalyze = useCallback(() => {
+    analyzeAbortRef.current?.abort()
+  }, [])
+
+  const cancelRender = useCallback(() => {
+    renderAbortRef.current?.abort()
+  }, [])
 
   const handleSyncPlayBoth = useCallback(() => {
     const srcEl = sourceVideoRef.current
@@ -499,6 +547,19 @@ export function VideoOptimizeWorkbench({
             </div>
           </div>
 
+          {analyzing && (
+            <AsyncStatusLine
+              className="mt-3"
+              testId="optimize-analyze-status"
+              label="本地 VLM 正在拆解关键帧"
+              startedAt={analyzeStartedAt}
+              stages={['读取关键帧', '模型逐帧诊断', '整理美化配方']}
+              stage={1}
+              detail="逐帧分析，耗时随帧数增长"
+              onCancel={cancelAnalyze}
+            />
+          )}
+
           {analyzeError && (
             <div className="mt-3 rounded-[10px] bg-[#FCEDEB] px-3.5 py-2.5 text-xs text-[#B3261E]" role="alert">
               {analyzeError}
@@ -683,6 +744,19 @@ export function VideoOptimizeWorkbench({
               )}
             </button>
           </div>
+
+          {rendering && (
+            <AsyncStatusLine
+              className="mt-3"
+              testId="optimize-render-status"
+              label="FFmpeg 正在执行美化渲染"
+              startedAt={renderStartedAt}
+              stages={['应用调色参数', '编码输出 MP4', '生成对比结果']}
+              stage={1}
+              detail="本地渲染，完成后自动刷新"
+              onCancel={cancelRender}
+            />
+          )}
 
           {renderError && (
             <div className="mt-3 rounded-[10px] bg-[#FCEDEB] px-3.5 py-2.5 text-xs text-[#B3261E]" role="alert">

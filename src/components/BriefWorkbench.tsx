@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { HttpError, patchJson, postJson } from '../api'
+import { useRef, useState } from 'react'
+import { HttpError, isAbortError, patchJson, postJson } from '../api'
 import type {
   StudioBrief,
   StudioBriefConfirmResponse,
@@ -8,6 +8,7 @@ import type {
   StudioShot
 } from '../types'
 import { SelectMenu } from './SelectMenu'
+import { AsyncStatusLine } from './ui'
 import { ASPECTS, Field, inputClass, primaryButton, quietButton } from './studio-ui'
 
 /*
@@ -235,6 +236,9 @@ export function BriefWorkbench({
   const [polished, setPolished] = useState<EditablePolished | null>(toEditable(brief?.polished ?? null))
   const [llm, setLlm] = useState<{ model: string; elapsed_ms: number } | null>(null)
   const [busy, setBusy] = useState<Busy>(null)
+  const [polishStartedAt, setPolishStartedAt] = useState<number | null>(null)
+  const [polishStage, setPolishStage] = useState(0)
+  const polishAbortRef = useRef<AbortController | null>(null)
   const [failure, setFailure] = useState<Failure | null>(null)
   const [note, setNote] = useState<string | null>(null)
 
@@ -288,23 +292,31 @@ export function BriefWorkbench({
     setAspect(fields.aspect)
     setTone(fields.tone)
 
+    const controller = new AbortController()
+    polishAbortRef.current = controller
+    setPolishStartedAt(Date.now())
+    setPolishStage(0)
     setBusy('polish')
     try {
       let base = current
       if (!base) {
-        base = await postJson<StudioBrief>('/api/studio/briefs', fieldsPayload(fields))
+        base = await postJson<StudioBrief>('/api/studio/briefs', fieldsPayload(fields), controller.signal)
         applyBrief(base)
       } else {
         base = await patchJson<StudioBrief>(
           `/api/studio/briefs/${encodeURIComponent(base.id)}`,
-          fieldsPayload(fields)
+          fieldsPayload(fields),
+          controller.signal
         )
         applyBrief(base)
       }
+      setPolishStage(1)
       const result = await postJson<StudioBriefPolishResponse>(
         `/api/studio/briefs/${encodeURIComponent(base.id)}/polish`,
-        {}
+        {},
+        controller.signal
       )
+      setPolishStage(2)
       setIdea(result.brief.idea)
       setAudience(result.brief.audience ?? '')
       setDuration(result.brief.duration_s != null ? String(result.brief.duration_s) : '')
@@ -321,10 +333,20 @@ export function BriefWorkbench({
           : `润色完成 · v${result.brief.version}${result.llm ? ` · ${result.llm.model}` : ''}`
       )
     } catch (err) {
-      setFailure(describeFailure(err))
+      if (isAbortError(err)) {
+        setNote('已取消润色')
+      } else {
+        setFailure(describeFailure(err))
+      }
     } finally {
+      polishAbortRef.current = null
+      setPolishStartedAt(null)
       setBusy(null)
     }
+  }
+
+  function cancelPolish() {
+    polishAbortRef.current?.abort()
   }
 
   async function runSave() {
@@ -515,6 +537,18 @@ export function BriefWorkbench({
         </Field>
       </div>
 
+      {busy === 'polish' && (
+        <AsyncStatusLine
+          testId="brief-polish-status"
+          label="本地模型正在润色 Brief"
+          startedAt={polishStartedAt}
+          stages={['提交想法', '模型润色', '整理分镜']}
+          stage={polishStage}
+          detail="最长 120 秒"
+          onCancel={cancelPolish}
+        />
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -524,7 +558,7 @@ export function BriefWorkbench({
           aria-busy={busy === 'polish'}
           className={`${primaryButton} h-9 px-3.5 text-[12px]`}
         >
-          {busy === 'polish' ? '润色中…（最长 120 秒）' : polished ? '再次润色' : '润色'}
+          {busy === 'polish' ? '润色中…' : polished ? '再次润色' : '润色'}
         </button>
         <button
           type="button"
@@ -552,6 +586,15 @@ export function BriefWorkbench({
         >
           <p className="font-medium">{failure.title}</p>
           {failure.detail && <p className="mt-0.5 break-words">{failure.detail}</p>}
+          <button
+            type="button"
+            data-testid="brief-retry"
+            onClick={() => void runPolish()}
+            disabled={busy !== null}
+            className="mt-1 font-medium underline underline-offset-2 disabled:opacity-50"
+          >
+            重试润色
+          </button>
         </div>
       )}
       {note && (

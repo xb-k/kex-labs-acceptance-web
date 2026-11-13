@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { Link } from '../router'
-import type { ToastMessage } from '../hooks'
+import { formatElapsed, useElapsed, type ToastMessage } from '../hooks'
 
 type ErrorBoundaryProps = {
   resetKey?: string
@@ -286,6 +286,94 @@ export function FilterChipGroup<T extends string>({
           </button>
         )
       })}
+    </div>
+  )
+}
+
+/**
+ * #136 统一大模型等待状态行：文案 + 已用时长（每秒 tick）+ 可选阶段点/进度 shimmer。
+ * - `prefers-reduced-motion` 走 CSS `motion-reduce:animate-none`；`reducedMotion` 可显式静态化。
+ * - 信息不只靠动画表达：已用秒数 / 阶段文字 / aria-busy 始终可读。
+ */
+export function AsyncStatusLine({
+  label,
+  startedAt,
+  stages,
+  stage,
+  error,
+  onRetry,
+  onCancel,
+  detail,
+  reducedMotion = false,
+  testId,
+  className
+}: {
+  label: string
+  startedAt: number | null | undefined
+  stages?: string[]
+  stage?: number
+  error?: string | null
+  onRetry?: () => void
+  onCancel?: () => void
+  detail?: string
+  reducedMotion?: boolean
+  testId?: string
+  className?: string
+}) {
+  const elapsedMs = useElapsed(startedAt)
+  const stageLabel =
+    stages && stages.length > 0 && typeof stage === 'number'
+      ? stages[Math.min(Math.max(stage, 0), stages.length - 1)]
+      : null
+  const stageText =
+    stageLabel && stages && stages.length > 0
+      ? `第 ${Math.min(Math.max(stage ?? 0, 0), stages.length - 1) + 1}/${stages.length} 步：${stageLabel}`
+      : null
+  const animated = reducedMotion ? '' : 'animate-pulse motion-reduce:animate-none'
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy={!error}
+      data-testid={testId ?? 'async-status-line'}
+      data-reduced-motion={reducedMotion ? 'true' : undefined}
+      className={`flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[10px] border border-black/[0.07] bg-white px-3 py-2 text-[11.5px] text-apple-text ${
+        className ?? ''
+      }`}
+    >
+      <span className={`h-2 w-2 shrink-0 rounded-full bg-apple-blue ${animated}`} aria-hidden="true" />
+      <span className="font-medium">{label}</span>
+      {stageText && <span className="text-apple-subtext">· {stageText}</span>}
+      {detail && <span className="text-apple-subtext">· {detail}</span>}
+      <span className="num ml-auto text-apple-subtext" data-testid="async-elapsed">
+        已用 {formatElapsed(elapsedMs)}
+      </span>
+      {!error && onCancel && (
+        <button
+          type="button"
+          onClick={onCancel}
+          data-testid="async-cancel"
+          className="rounded-md border border-black/[0.1] px-2 py-0.5 text-[11px] font-medium text-apple-subtext transition-colors hover:bg-black/[0.04] hover:text-apple-text"
+        >
+          取消
+        </button>
+      )}
+      {error && (
+        <span role="alert" className="break-words text-[#B42318]">
+          {error}
+        </span>
+      )}
+      {error && onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          data-testid="async-retry"
+          className="rounded-md border border-[#F5C2C7] bg-[#FFF5F5] px-2 py-0.5 text-[11px] font-medium text-[#B42318] transition-colors hover:bg-[#FFEBEB]"
+        >
+          重试
+        </button>
+      )}
     </div>
   )
 }

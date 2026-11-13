@@ -274,3 +274,44 @@ export function useInfiniteScrollBatch(
     sentinelRef
   }
 }
+
+/**
+ * #136 等待计时基础设施：已用毫秒（startedAt 为空或未来时间按 0）。
+ * 纯函数便于用 fake timers 校验时钟推进；组件统一经由 useElapsed 读取。
+ */
+export function elapsedMilliseconds(
+  startedAt: number | null | undefined,
+  now: number = Date.now()
+): number {
+  if (startedAt === null || startedAt === undefined || !Number.isFinite(startedAt)) return 0
+  return Math.max(0, now - startedAt)
+}
+
+/** 统一「已用时长」文案：12.3s / 0.4s（#136）。 */
+export function formatElapsed(ms: number): string {
+  const safe = Number.isFinite(ms) && ms > 0 ? ms : 0
+  return `${(safe / 1000).toFixed(1)}s`
+}
+
+/**
+ * 每秒 tick 的等待计时器（#136）。
+ * - startedAt 为 null 时返回 0 且不启动定时器；
+ * - startedAt 变化或组件卸载时清理 interval，避免泄漏。
+ */
+export function useElapsed(startedAt: number | null | undefined): number {
+  const [elapsedMs, setElapsedMs] = useState(() => elapsedMilliseconds(startedAt))
+
+  useEffect(() => {
+    if (startedAt === null || startedAt === undefined) {
+      setElapsedMs(0)
+      return
+    }
+    setElapsedMs(elapsedMilliseconds(startedAt))
+    const timer = window.setInterval(() => {
+      setElapsedMs(elapsedMilliseconds(startedAt))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [startedAt])
+
+  return elapsedMs
+}
