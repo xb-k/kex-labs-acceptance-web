@@ -155,7 +155,7 @@ export function StageNodeTrack({
                             className="h-24 w-full object-cover"
                           />
                         ) : (
-                          <div className="grid h-24 place-items-center text-[11px] text-white/60">
+                          <div className="grid h-24 min-w-0 place-items-center break-all px-2 text-center text-[11px] leading-relaxed text-white/60">
                             产物路径：{art.path}
                           </div>
                         )}

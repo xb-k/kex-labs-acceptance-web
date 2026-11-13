@@ -567,15 +567,17 @@ export function ProductionTrackerPage() {
               {filteredAlerts.map((item, idx) => (
                 <li
                   key={`${item.type}-${item.id ?? idx}`}
-                  className="flex items-start justify-between gap-3 rounded-lg bg-apple-bg/70 px-3 py-2 text-[12px]"
+                  className="flex min-w-0 items-start justify-between gap-3 rounded-lg bg-apple-bg/70 px-3 py-2 text-[12px]"
                 >
                   <div className="min-w-0">
                     <span className={`mr-2 font-semibold ${ALERT_TONES[item.type]}`}>
                       {ALERT_LABELS[item.type]}
                     </span>
-                    <span className="font-medium text-apple-text">{item.title}</span>
+                    <span className="break-words font-medium text-apple-text">{item.title}</span>
                     {item.detail && (
-                      <p className="mt-0.5 truncate text-[11px] text-apple-subtext">{item.detail}</p>
+                      <p className="mt-0.5 truncate text-[11px] text-apple-subtext" title={item.detail}>
+                        {item.detail}
+                      </p>
                     )}
                   </div>
                   <Link
@@ -692,7 +694,7 @@ export function ProductionTrackerPage() {
                 <span className="w-36 shrink-0 font-mono text-[11.5px] font-semibold text-apple-blueInk">
                   {role}
                 </span>
-                <span className="flex-1 text-apple-text">{summary}</span>
+                <span className="min-w-0 flex-1 break-words text-apple-text">{summary}</span>
                 <span className="shrink-0 font-mono text-[11px] text-apple-subtext">{kind}</span>
               </div>
             )
