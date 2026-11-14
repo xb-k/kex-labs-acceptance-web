@@ -741,6 +741,7 @@ export function PoseLibraryPanel({
 }) {
   const [search, setSearch] = useState('')
   const [filters, setFilters] = useState<PoseFilters>(EMPTY_POSE_FILTERS)
+  const [limit, setLimit] = useState(24)
   const [addOpen, setAddOpen] = useState(false)
   const [confirmEntry, setConfirmEntry] = useState<PoseLibraryItem | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -760,9 +761,14 @@ export function PoseLibraryPanel({
     return () => window.clearTimeout(timer)
   }, [search])
 
+  // 筛选条件变化回到第一页（24 条），翻页量不跨筛选继承。
+  useEffect(() => {
+    setLimit(24)
+  }, [filters])
+
   const url = useMemo(
-    () => buildPoseLibraryQuery({ q: filters.q, license: filters.license, shot: filters.shot }),
-    [filters]
+    () => buildPoseLibraryQuery({ q: filters.q, license: filters.license, shot: filters.shot }, limit),
+    [filters, limit]
   )
   const listing = useJson<PoseLibraryList>(url)
 
@@ -980,16 +986,31 @@ export function PoseLibraryPanel({
         )}
 
         {listing.status === 'ready' && items.length > 0 && (
-          <PoseLibraryGrid
-            items={items}
-            deletingId={deletingId}
-            usingId={usingId}
-            usingVideoId={usingVideoId}
-            onDelete={openDelete}
-            onCopy={(item) => void copyId(item)}
-            onUse={(item) => void usePose(item)}
-            onUseVideo={(item) => void usePoseVideo(item)}
-          />
+          <>
+            <PoseLibraryGrid
+              items={items}
+              deletingId={deletingId}
+              usingId={usingId}
+              usingVideoId={usingVideoId}
+              onDelete={openDelete}
+              onCopy={(item) => void copyId(item)}
+              onUse={(item) => void usePose(item)}
+              onUseVideo={(item) => void usePoseVideo(item)}
+            />
+            {items.length < total && (
+              <div className="mt-4 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setLimit((n) => n + 24)}
+                  data-testid="pose-load-more"
+                  aria-label="加载更多姿态参考"
+                  className="inline-flex h-9 items-center gap-1 rounded-full border border-black/[0.08] px-4 text-[12px] font-medium text-apple-text transition-colors hover:bg-black/[0.04]"
+                >
+                  加载更多（{items.length}/{total}）
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 
