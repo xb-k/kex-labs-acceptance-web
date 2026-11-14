@@ -103,6 +103,10 @@ export type ShotRoleAction = {
   diffAfter?: string
   candidates?: Array<{ name: string; score: string; picked: boolean; note: string }>
   metrics?: Array<{ label: string; value: string; pass: boolean | 'unknown' }>
+  /** 无 shots 合成单镜时，直接透传 state 里 tools[] 的真实字段。 */
+  status?: string | null
+  durationMs?: number | null
+  artifact?: string | null
 }
 
 export type ShotStoryboardItem = {
@@ -131,6 +135,60 @@ const ROLE_BY_STAGE: Record<string, Exclude<AgentRoleId, 'all'>> = {
   D: 'editor',
   E: 'colorist',
   F: 'audio'
+}
+
+/**
+ * 无 shots（A 轨 keyframe-only / 单镜成片）时的角色映射：
+ * 没有切镜记录，按阶段工具链归到实际执行角色，未参与的 6 角色显式留白。
+ */
+const SYNTH_ROLE_BY_STAGE: Record<string, Exclude<AgentRoleId, 'all'>> = {
+  A: 'director',
+  B: 'director',
+  B2: 'director',
+  SCRIPT: 'writer',
+  C: 'cinematographer',
+  D: 'editor',
+  E: 'colorist',
+  F: 'audio'
+}
+
+/** 单镜合成场景标签：不伪造分镜数量，只标注「未记录分镜」。 */
+export const SINGLE_SHOT_SCENE_LABEL = '单镜成片（未记录分镜）'
+
+export type ShotRoleGroup = {
+  role: AgentRoleMeta
+  actions: ShotRoleAction[]
+}
+
+/** 按 6 个标准角色分组；无动作的角色也返回空组，供 UI 渲染「未参与本镜」。 */
+export function groupShotActionsByRole(
+  shot: ShotStoryboardItem,
+  roleFilter: AgentRoleId = 'all'
+): ShotRoleGroup[] {
+  const roles = roleFilter === 'all' ? AGENT_ROLES : AGENT_ROLES.filter((role) => role.id === roleFilter)
+  return roles.map((role) => ({
+    role,
+    actions: shot.actions.filter((action) => action.role === role.id)
+  }))
+}
+
+export function formatDurationMs(durationMs: number | null | undefined): string {
+  if (durationMs === null || durationMs === undefined) return '未记录'
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`
+  return `${(durationMs / 1000).toFixed(1)}s`
+}
+
+function toolStatusLabel(status: string | null | undefined): string {
+  if (!status) return '状态未记录'
+  const labels: Record<string, string> = {
+    done: '完成',
+    running: '执行中',
+    failed: '失败',
+    skipped: '跳过',
+    cached: '缓存命中',
+    pending: '待执行'
+  }
+  return labels[status] ?? status
 }
 
 export type QcBadgeState = 'pass' | 'fail' | 'unknown'
@@ -412,7 +470,50 @@ export function buildStoryboard(job: FlowJob | null, brief?: StudioBrief | null)
   }
 
   const shots = job.shots ?? []
-  if (!shots.length) return []
+  if (!shots.length) {
+    // A 轨 keyframe-only / 单镜成片没有 shots：合成 1 镜，不伪造分镜数量。
+    const durationS = job.duration_s ?? null
+    const actions: ShotRoleAction[] = []
+
+    for (const stage of job.stages) {
+      const role = SYNTH_ROLE_BY_STAGE[stage.key] ?? ROLE_BY_STAGE[stage.key] ?? 'director'
+      for (const [toolIndex, tool] of (stage.tools ?? []).entries()) {
+        actions.push({
+          id: `single-${stage.key}-${toolIndex}`,
+          role,
+          stageKey: stage.key,
+          tool: tool.name,
+          timestamp: stageTimeLabel(job, stage.key, `Phase ${stage.key}`),
+          actionTitle: `${tool.name} · ${toolStatusLabel(tool.status)}`,
+          inputFact: `阶段 ${stage.key} · 状态 ${tool.status ?? '未记录'}`,
+          decisionReason: '单镜成片无分镜记录，按阶段工具链还原真实处理轨迹；未参与角色不伪造动作。',
+          outputSummary: tool.artifact ? `产物 ${tool.artifact}` : '产物未记录',
+          status: tool.status ?? null,
+          durationMs: tool.duration_ms ?? null,
+          artifact: tool.artifact ?? null
+        })
+      }
+    }
+
+    return [
+      {
+        shotId: 1,
+        label: 'Shot 01',
+        startS: 0,
+        endS: durationS,
+        durationS,
+        sceneSummary: SINGLE_SHOT_SCENE_LABEL,
+        pacingTag: durationS === null ? '时长未记录' : durationS >= 4.0 ? '长呼吸镜' : '中快切镜',
+        media: {
+          originalFrame: findStageMedia('A', 0, 'image') ?? findStageMedia('B', 0, 'image'),
+          redrawnFrame: findStageMedia('C', 0, 'image'),
+          i2vClip: findStageMedia('D', 0, 'video'),
+          gradedClip: findStageMedia('F', 0, 'video') ?? findStageMedia('E', 0, 'video')
+        },
+        actions
+      }
+    ]
+  }
 
   const semSubjectRaw = asRecord(asRecord(job.semantics)?.subject)?.name
   const semSubject = typeof semSubjectRaw === 'string' && semSubjectRaw.trim() ? semSubjectRaw : '主体未记录'

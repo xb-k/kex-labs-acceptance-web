@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import { Check, Refresh, Split } from '../icons'
 import {
   AGENT_ROLES,
+  formatDurationMs,
+  groupShotActionsByRole,
   type AgentRoleId,
   type ShotRoleAction,
   type ShotStoryboardItem
@@ -37,11 +39,10 @@ export function ShotAgentMatrix({
     [shots, selectedShotId]
   )
 
-  const visibleActions = useMemo(() => {
-    if (!currentShot) return []
-    if (roleFilter === 'all') return currentShot.actions
-    return currentShot.actions.filter((a) => a.role === roleFilter)
-  }, [currentShot, roleFilter])
+  const visibleGroups = useMemo(
+    () => (currentShot ? groupShotActionsByRole(currentShot, roleFilter) : []),
+    [currentShot, roleFilter]
+  )
 
   if (!currentShot) {
     return (
@@ -59,14 +60,15 @@ export function ShotAgentMatrix({
 
   const activeMediaUrl =
     monitorStage === 'original'
-      ? origUrl
+      ? origUrl ?? redrawnUrl ?? gradedUrl ?? i2vUrl
       : monitorStage === 'redrawn'
-        ? redrawnUrl ?? origUrl
+        ? redrawnUrl ?? origUrl ?? gradedUrl ?? i2vUrl
         : monitorStage === 'i2v'
           ? i2vUrl ?? gradedUrl
           : gradedUrl ?? i2vUrl
 
-  const isVideoMode = (monitorStage === 'i2v' || monitorStage === 'graded') && Boolean(activeMediaUrl?.endsWith('.mp4'))
+  // 产物按真实扩展名决定播放器：单镜成片可能只有 F 阶段 mp4 落在「重绘」默认页。
+  const isVideoMode = Boolean(activeMediaUrl && /\.(mp4|webm|mov)(\?|$)/i.test(activeMediaUrl))
 
   return (
     <section aria-label="分镜与多角色 Agent 协同处理台" className="card p-5">
@@ -111,7 +113,15 @@ export function ShotAgentMatrix({
               <div className="mt-1 truncate text-[12.5px] font-medium text-apple-text" title={shot.sceneSummary}>
                 {shot.sceneSummary}
               </div>
-              <div className="mt-1 text-[11px] text-apple-subtext">{shot.pacingTag} · 6 角色已记录</div>
+              <div className="mt-1 text-[11px] text-apple-subtext">
+                {shot.pacingTag} ·{' '}
+                {(() => {
+                  const participating = new Set(shot.actions.map((action) => action.role)).size
+                  if (participating === 6) return '6 角色已记录'
+                  if (participating === 0) return '角色动作未记录'
+                  return `${participating} 角色参与 · ${6 - participating} 未参与`
+                })()}
+              </div>
             </button>
           )
         })}
@@ -277,9 +287,27 @@ export function ShotAgentMatrix({
           </div>
 
           <div className="mt-3 space-y-3">
-            {visibleActions.map((act) => {
-              const role = AGENT_ROLES.find((r) => r.id === act.role)!
-              return (
+            {visibleGroups.map(({ role, actions }) => (
+              <div key={role.id} className="space-y-3">
+                {actions.length === 0 ? (
+                  <article
+                    key={`empty-${role.id}`}
+                    className="rounded-[14px] border border-dashed border-black/[0.10] bg-[#FAFAFB] p-4"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span
+                        className={`rounded-md border px-2 py-0.5 text-[11px] font-semibold ${role.accentBg} ${role.accentText} ${role.accentBorder}`}
+                      >
+                        {role.name} Agent
+                      </span>
+                      <span className="font-medium text-apple-subtext">未参与本镜</span>
+                    </div>
+                    <p className="mt-2 text-[12px] leading-relaxed text-apple-subtext">
+                      该镜头未记录到 {role.name} 角色的工具动作（state 无对应阶段产物）。
+                    </p>
+                  </article>
+                ) : (
+                  actions.map((act) => (
                 <article
                   key={act.id}
                   className="rounded-[14px] border border-black/[0.07] bg-white p-4 transition-colors hover:border-black/[0.14]"
@@ -294,6 +322,16 @@ export function ShotAgentMatrix({
                       <span className="font-mono text-[11px] text-apple-subtext">{act.tool}</span>
                       <span aria-hidden="true" className="text-apple-subtext/40">·</span>
                       <span className="num text-[11px] text-apple-subtext">{act.timestamp}</span>
+                      {act.status !== undefined && (
+                        <>
+                          <span aria-hidden="true" className="text-apple-subtext/40">·</span>
+                          <span className="text-[11px] text-apple-subtext">状态 {act.status ?? '未记录'}</span>
+                          <span aria-hidden="true" className="text-apple-subtext/40">·</span>
+                          <span className="num text-[11px] text-apple-subtext">
+                            耗时 {formatDurationMs(act.durationMs)}
+                          </span>
+                        </>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-1.5">
@@ -352,6 +390,12 @@ export function ShotAgentMatrix({
                       <dt className="w-20 shrink-0 text-apple-subtext">产出交付</dt>
                       <dd className="font-medium text-apple-text">{act.outputSummary}</dd>
                     </div>
+                    {act.artifact && (
+                      <div className="flex flex-col sm:flex-row sm:gap-2">
+                        <dt className="w-20 shrink-0 text-apple-subtext">产物文件</dt>
+                        <dd className="break-all font-mono text-[11.5px] text-apple-text">{act.artifact}</dd>
+                      </div>
+                    )}
                   </dl>
 
                   {/* Optional Prompt Diff */}
@@ -401,8 +445,10 @@ export function ShotAgentMatrix({
                     </div>
                   )}
                 </article>
-              )
-            })}
+                  ))
+                )}
+              </div>
+            ))}
           </div>
         </div>
       </div>
