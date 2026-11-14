@@ -470,6 +470,20 @@ function synthesizeKeyframeBrief(ctx: StudioContext, prompt: string): Brief {
   return brief
 }
 
+/**
+ * #169: a synthesized Brief only exists to carry a keyframe-only job's prompt
+ * into intake. If the job never reaches intake, the Brief is orphaned — drop
+ * the file so `/api/studio/briefs` does not list a `/api/studio/jobs` remnant.
+ * Only the synthesized id is ever passed here; user briefs stay untouched.
+ */
+function discardSyntheticBrief(ctx: StudioContext, briefId: string): void {
+  try {
+    fs.unlinkSync(briefPath(ctx, briefId))
+  } catch {
+    // best effort: a missing / already-removed file is not an error
+  }
+}
+
 type BriefFields = Pick<
   Brief,
   'idea' | 'audience' | 'duration_s' | 'aspect' | 'tone' | 'references' | 'polished' | 'status'
@@ -1729,6 +1743,7 @@ async function submitJob(
     const brief = readBrief(ctx, briefId)
     if (!brief) {
       if (syntheticBrief) {
+        discardSyntheticBrief(ctx, briefId)
         ctx.sendJson(res, 500, { error: 'synthetic_brief_invalid', path: '' })
         return
       }
@@ -1738,6 +1753,7 @@ async function submitJob(
     const checked = validatePolished(brief.polished)
     if (!checked.ok) {
       if (syntheticBrief) {
+        discardSyntheticBrief(ctx, briefId)
         ctx.sendJson(res, 500, {
           error: 'synthetic_brief_invalid',
           path: checked.path,
@@ -1757,6 +1773,7 @@ async function submitJob(
   }
   const upstream = await callIntake(ctx, 'POST', '/intake/jobs', payload)
   if (!upstream.ok || upstream.status >= 400) {
+    if (syntheticBrief && briefId) discardSyntheticBrief(ctx, briefId)
     if (upload) {
       const reason = !upstream.ok
         ? upstream.body.reason

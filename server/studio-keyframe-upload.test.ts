@@ -26,6 +26,8 @@ const hits: Array<{ method: string; url: string; body: any }> = []
 const uploadMetas: Record<string, any> = {}
 /** #165: per-job intake state so retry can see failed/canceled. */
 const jobStates: Record<string, string> = {}
+/** #169: force the next POST /intake/jobs to fail so rollback can be asserted. */
+let failNextIntakeJob = false
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status
@@ -121,6 +123,13 @@ function intakeJobPosts() {
   return hits.filter((hit) => hit.method === 'POST' && hit.url === '/intake/jobs')
 }
 
+async function listBriefIds(): Promise<string[]> {
+  const r = await fetch(`${base}/api/studio/briefs?limit=200`)
+  assert.equal(r.status, 200)
+  const body = (await r.json()) as { items: Array<{ id: string }> }
+  return body.items.map((item) => item.id)
+}
+
 before(async () => {
   fs.rmSync(dataRoot, { recursive: true, force: true })
   writeUpload(
@@ -147,6 +156,11 @@ before(async () => {
     hits.push({ method: req.method ?? 'GET', url: url.pathname + url.search, body })
 
     if (url.pathname === '/intake/jobs' && req.method === 'POST') {
+      if (failNextIntakeJob) {
+        failNextIntakeJob = false
+        sendJson(res, 502, { error: 'down' })
+        return
+      }
       sendJson(res, 201, { id: 'pose-video-1' })
       return
     }
@@ -363,4 +377,22 @@ test('#165 重试复用合成 brief，不再新建', async () => {
   const retryMeta = JSON.parse(fs.readFileSync(jobMetaFile('pose-video-1'), 'utf8'))
   assert.equal(retryMeta.brief_id, briefId)
   assert.equal(retryMeta.synthetic_brief, true)
+})
+
+test('#169 intake 失败 → 合成的 brief 回滚，不留孤条', async () => {
+  const before = briefCount()
+  const idsBefore = await listBriefIds()
+
+  failNextIntakeJob = true
+  const failed = await postJob(poseVideoBody('up-pose-ok01'))
+  assert.equal(failed.status, 502)
+  const failedBody = (await failed.json()) as { error: string }
+  assert.equal(failedBody.error, 'down')
+
+  assert.equal(briefCount(), before, '502 后不应残留合成 brief')
+  assert.deepEqual(await listBriefIds(), idsBefore, '列表不应多出孤立 brief')
+
+  const ok = await postJob(poseVideoBody('up-pose-ok01'))
+  assert.equal(ok.status, 201)
+  assert.equal(briefCount(), before + 1, '恢复后正常合成 1 个 brief')
 })
