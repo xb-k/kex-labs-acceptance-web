@@ -172,6 +172,115 @@ export function deliveryDeleteCopy(item: Delivery): {
   }
 }
 
+export type DeliveryDeleteFailure = { jobId: string; message: string }
+
+export type BatchDeleteResult =
+  | { jobId: string; ok: true; bytes: number }
+  | { jobId: string; ok: false; message: string }
+
+/** 选择集合与当前列表对齐：保留仍存在的项，清理已消失的项；无变化时返回原引用避免重渲染。 */
+export function pruneSelection(
+  selected: ReadonlySet<string>,
+  items: readonly { jobId: string }[]
+): ReadonlySet<string> {
+  const present = new Set(items.map((item) => item.jobId))
+  let changed = false
+  for (const id of selected) {
+    if (!present.has(id)) {
+      changed = true
+      break
+    }
+  }
+  if (!changed) return selected
+  const next = new Set<string>()
+  for (const id of selected) {
+    if (present.has(id)) next.add(id)
+  }
+  return next
+}
+
+export function toggleSelection(selected: ReadonlySet<string>, jobId: string): ReadonlySet<string> {
+  const next = new Set(selected)
+  if (next.has(jobId)) next.delete(jobId)
+  else next.add(jobId)
+  return next
+}
+
+/** 全选/取消全选当前筛选结果；筛选外的已选项保持不变。 */
+export function toggleSelectAllVisible(
+  selected: ReadonlySet<string>,
+  visibleIds: readonly string[]
+): ReadonlySet<string> {
+  const all = allVisibleSelected(selected, visibleIds)
+  const next = new Set(selected)
+  for (const id of visibleIds) {
+    if (all) next.delete(id)
+    else next.add(id)
+  }
+  return next
+}
+
+export function allVisibleSelected(
+  selected: ReadonlySet<string>,
+  visibleIds: readonly string[]
+): boolean {
+  return visibleIds.length > 0 && visibleIds.every((id) => selected.has(id))
+}
+
+/** 批量确认摘要：jobId 最多展开 10 条，其余折叠计数；`bytes` 缺失按 0 求和。 */
+export function batchDeleteSummary(items: readonly Delivery[]): {
+  jobIds: string[]
+  shown: string[]
+  extra: number
+  totalBytes: number
+} {
+  const jobIds = items.map((item) => item.jobId)
+  const shown = jobIds.slice(0, 10)
+  return {
+    jobIds,
+    shown,
+    extra: Math.max(0, jobIds.length - shown.length),
+    totalBytes: items.reduce((sum, item) => sum + (item.bytes ?? 0), 0)
+  }
+}
+
+export function batchDeleteCopy(count: number): { title: string; body: string } {
+  return {
+    title: `永久删除 ${count} 项 NAS 文件？`,
+    body: `${MEDIA_DELETE_CONFIRM}。`
+  }
+}
+
+export function failedSelection(results: readonly BatchDeleteResult[]): Set<string> {
+  return new Set(
+    results.filter((result): result is Extract<BatchDeleteResult, { ok: false }> => !result.ok).map(
+      (result) => result.jobId
+    )
+  )
+}
+
+/** 串行逐条 DELETE：每条结果独立记录，失败不阻断后续项。 */
+export async function runBatchDelete(
+  jobIds: readonly string[],
+  remove: (jobId: string) => Promise<DeliveryTrashResponse> = (jobId) =>
+    deleteJson<DeliveryTrashResponse>(`/api/deliveries/${encodeURIComponent(jobId)}`),
+  onProgress?: (done: number, total: number) => void
+): Promise<BatchDeleteResult[]> {
+  const total = jobIds.length
+  const results: BatchDeleteResult[] = []
+  for (let index = 0; index < jobIds.length; index += 1) {
+    const jobId = jobIds[index]
+    try {
+      const result = await remove(jobId)
+      results.push({ jobId, ok: true, bytes: result.bytes })
+    } catch (err) {
+      results.push({ jobId, ok: false, message: formatHttpError(err, '删除失败，请稍后重试。') })
+    }
+    onProgress?.(index + 1, total)
+  }
+  return results
+}
+
 /** 播放/预览弹层：视频用原生 <video controls>，图片用 <img>（服务端已支持 Range）。 */
 function PlayerDialog({ item, onClose }: { item: Delivery; onClose: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null)
@@ -364,6 +473,140 @@ function DeleteDialog({
   )
 }
 
+/** 批量删除确认：列出 jobId（≤10）与总大小；串行删除进度与逐条失败原因都留在框内。 */
+function BatchDeleteDialog({
+  items,
+  busy,
+  progress,
+  failures,
+  onCancel,
+  onConfirm
+}: {
+  items: Delivery[]
+  busy: boolean
+  progress: { done: number; total: number }
+  failures: DeliveryDeleteFailure[]
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const panelRef = useRef<HTMLDivElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const titleId = useId()
+  const descId = useId()
+  const summary = batchDeleteSummary(items)
+  const copy = batchDeleteCopy(summary.jobIds.length)
+  const retry = failures.length > 0
+  const close = useCallback(() => {
+    if (!busy) onCancel()
+  }, [busy, onCancel])
+
+  useModalA11y(true, panelRef, close, cancelRef)
+
+  return createPortal(
+    <div
+      className="dialog-overlay fixed inset-0 z-[70] flex items-end justify-center bg-apple-text/30 backdrop-blur-[2px] sm:items-center sm:p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) close()
+      }}
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descId}
+        data-testid="delivery-batch-delete-dialog"
+        className="dialog-panel max-h-[100dvh] w-full overflow-y-auto rounded-t-[20px] border border-black/[0.08] bg-white p-5 shadow-lift sm:max-h-[90dvh] sm:max-w-[440px] sm:rounded-card"
+      >
+        <h2 id={titleId} className="text-[17px] font-semibold tracking-[-0.01em]">
+          {copy.title}
+        </h2>
+        <p id={descId} className="mt-1.5 text-sm leading-relaxed text-apple-subtext">
+          {copy.body}
+        </p>
+        <ul
+          data-testid="delivery-batch-delete-ids"
+          className="num mt-3 max-h-40 space-y-0.5 overflow-y-auto rounded-xl bg-apple-bg px-3 py-2.5 text-xs"
+        >
+          {summary.shown.map((jobId) => (
+            <li key={jobId} className="truncate">
+              {jobId}
+            </li>
+          ))}
+          {summary.extra > 0 && (
+            <li className="text-apple-subtext" data-testid="delivery-batch-delete-extra">
+              等 {summary.extra} 项
+            </li>
+          )}
+        </ul>
+        <dl className="num mt-2 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+          <dt className="text-apple-subtext">总大小</dt>
+          <dd className="font-medium" data-testid="delivery-batch-delete-size">
+            {formatBytes(summary.totalBytes, BYTE_OPTS)}
+          </dd>
+        </dl>
+        {busy && (
+          <p
+            role="status"
+            aria-live="polite"
+            data-testid="delivery-batch-delete-progress"
+            className="num mt-3 text-xs text-apple-subtext"
+          >
+            正在删除 {progress.done} / {progress.total} 项…
+          </p>
+        )}
+        {failures.length > 0 && (
+          <div
+            role="alert"
+            data-testid="delivery-batch-delete-errors"
+            className="mt-3 rounded-lg bg-[#FCEDEB] px-3 py-2 text-xs leading-relaxed text-[#B3261E] ring-1 ring-inset ring-[#F3D3CF]"
+          >
+            <p className="font-medium">以下 {failures.length} 项删除失败（已保留选择）：</p>
+            <ul className="mt-1 space-y-1">
+              {failures.map((failure) => (
+                <li key={failure.jobId}>
+                  <span className="num font-medium">{failure.jobId}</span>
+                  <span className="mx-1" aria-hidden="true">
+                    ·
+                  </span>
+                  {failure.message}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={close}
+            disabled={busy}
+            className="press inline-flex h-9 items-center rounded-lg bg-apple-bg px-3.5 text-xs font-medium text-apple-text transition-colors hover:bg-[#ECECEF] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 disabled:opacity-60"
+          >
+            {retry ? '关闭' : '取消'}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy || summary.jobIds.length === 0}
+            aria-busy={busy}
+            data-testid="delivery-batch-delete-confirm"
+            className="press inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#B3261E] px-3.5 text-xs font-medium text-white transition-colors hover:bg-[#98200F] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B3261E]/50 disabled:opacity-60"
+          >
+            <Trash className="h-3.5 w-3.5" />
+            {busy
+              ? `正在删除 ${progress.done}/${progress.total}…`
+              : retry
+                ? '重试失败项'
+                : '永久删除'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
 /**
  * 卡片右下角的「…」次要操作菜单。用 portal + fixed 定位，避免被卡片的
  * overflow-hidden 裁切；键盘：Enter/Space 打开、↑↓/Home/End 移动、Esc 关闭。
@@ -491,10 +734,14 @@ function MoreMenu({
 
 export function DeliveryCard({
   item,
-  onDeleted
+  onDeleted,
+  selected = false,
+  onSelectChange
 }: {
   item: Delivery
   onDeleted: (item: Delivery, result: DeliveryTrashResponse) => void
+  selected?: boolean
+  onSelectChange?: (jobId: string, checked: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
@@ -551,6 +798,16 @@ export function DeliveryCard({
           ) : (
             <Cover sources={sources} title={item.title} />
           )}
+          <label className="absolute left-2 top-2 z-10 grid h-7 w-7 cursor-pointer place-items-center rounded-lg bg-white/95 shadow-sm ring-1 ring-black/[0.08]">
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={(event) => onSelectChange?.(item.jobId, event.target.checked)}
+              aria-label={`选择交付 ${item.title}`}
+              data-testid={`delivery-select-${item.jobId}`}
+              className="h-4 w-4 cursor-pointer accent-apple-blue focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+            />
+          </label>
           {!isImage && (
             <span
               data-testid="delivery-duration"
@@ -746,10 +1003,26 @@ export function DeliveriesPage() {
   const [gateFilter, setGateFilter] = useState<GateFilter>('all')
   const [onlyRepaired, setOnlyRepaired] = useState(false)
   const [sortBy, setSortBy] = useState<SortKey>('default')
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [batchFailures, setBatchFailures] = useState<DeliveryDeleteFailure[]>([])
+  const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 })
+  const selectAllRef = useRef<HTMLInputElement>(null)
 
   const deliveries = useMemo(
     () => (data?.deliveries ?? []).filter((item) => !removedIds.has(item.jobId)),
     [data?.deliveries, removedIds]
+  )
+
+  /** 刷新/单条删除后只清理消失项；仍存在的已选项跨筛选保留。 */
+  useEffect(() => {
+    setSelectedIds((current) => pruneSelection(current, deliveries))
+  }, [deliveries])
+
+  const selectedItems = useMemo(
+    () => deliveries.filter((item) => selectedIds.has(item.jobId)),
+    [deliveries, selectedIds]
   )
 
   const counts = useMemo(
@@ -782,6 +1055,56 @@ export function DeliveriesPage() {
       return scoreSortValue(b.score) - scoreSortValue(a.score)
     })
   }, [deliveries, query, gateFilter, onlyRepaired, sortBy])
+
+  const visibleIds = useMemo(() => visibleDeliveries.map((item) => item.jobId), [visibleDeliveries])
+  const allSelected = allVisibleSelected(selectedIds, visibleIds)
+  const someSelected = visibleIds.some((id) => selectedIds.has(id))
+
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected && !allSelected
+  }, [someSelected, allSelected])
+
+  /** 卡片勾选：只在选中态真正变化时更新，避免受控 checkbox 抖动。 */
+  const onSelectChange = useCallback((jobId: string, checked: boolean) => {
+    setSelectedIds((current) => (current.has(jobId) === checked ? current : toggleSelection(current, jobId)))
+  }, [])
+
+  const confirmBatchDelete = useCallback(async () => {
+    if (batchBusy) return
+    const ids = selectedItems.map((item) => item.jobId)
+    if (ids.length === 0) return
+    setBatchBusy(true)
+    setBatchFailures([])
+    setBatchProgress({ done: 0, total: ids.length })
+    const results = await runBatchDelete(ids, undefined, (done, total) =>
+      setBatchProgress({ done, total })
+    )
+    const deletedIds = results.filter((result) => result.ok).map((result) => result.jobId)
+    const failures: DeliveryDeleteFailure[] = results
+      .filter((result): result is Extract<BatchDeleteResult, { ok: false }> => !result.ok)
+      .map((result) => ({ jobId: result.jobId, message: result.message }))
+    if (deletedIds.length > 0) {
+      setRemovedIds((current) => {
+        const next = new Set(current)
+        for (const id of deletedIds) next.add(id)
+        return next
+      })
+    }
+    setSelectedIds(new Set(failures.map((failure) => failure.jobId)))
+    setBatchFailures(failures)
+    setBatchBusy(false)
+    if (failures.length === 0) {
+      setBatchOpen(false)
+      setBatchProgress({ done: 0, total: 0 })
+      showToast(`已永久删除 ${deletedIds.length} 项 NAS 文件（不可恢复）。`, 'ok')
+    } else {
+      showToast(
+        `已删除 ${deletedIds.length} 项，${failures.length} 项失败；失败项已保留选择。`,
+        'err'
+      )
+    }
+    refresh()
+  }, [batchBusy, selectedItems, showToast, refresh])
 
   const batch = useInfiniteScrollBatch(
     visibleDeliveries.length,
@@ -925,6 +1248,58 @@ export function DeliveriesPage() {
             </div>
           </div>
 
+          {visibleDeliveries.length > 0 && (
+            <div
+              data-testid="deliveries-selection-toolbar"
+              className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-black/[0.06] bg-white px-3 py-2"
+            >
+              <label className="inline-flex items-center gap-2 text-xs font-medium text-apple-text">
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={() =>
+                    setSelectedIds((current) => toggleSelectAllVisible(current, visibleIds))
+                  }
+                  aria-label={allSelected ? '取消全选当前筛选结果' : '全选当前筛选结果'}
+                  data-testid="delivery-select-all"
+                  className="h-4 w-4 cursor-pointer rounded border-black/20 accent-apple-blue focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
+                />
+                {allSelected ? '取消全选' : '全选当前筛选'}
+              </label>
+              <span
+                className="num text-xs text-apple-subtext"
+                data-testid="delivery-selected-count"
+              >
+                已选 {selectedItems.length} 项
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setBatchFailures([])
+                  setBatchProgress({ done: 0, total: 0 })
+                  setBatchOpen(true)
+                }}
+                disabled={selectedItems.length === 0 || batchBusy}
+                aria-busy={batchBusy}
+                data-testid="delivery-batch-delete-open"
+                className="press inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#B3261E] px-2.5 text-xs font-medium text-white transition-colors hover:bg-[#98200F] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B3261E]/50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Trash className="h-3.5 w-3.5" />
+                删除选中
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                disabled={selectedItems.length === 0 || batchBusy}
+                data-testid="delivery-select-clear"
+                className="press inline-flex h-8 items-center rounded-lg border border-black/[0.08] bg-white px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-apple-bg focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                清空选择
+              </button>
+            </div>
+          )}
+
           {visibleDeliveries.length === 0 ? (
             <div className="card mt-4 p-5">
               <p className="text-sm font-medium">没有匹配的交付产物</p>
@@ -934,7 +1309,13 @@ export function DeliveriesPage() {
             <>
               <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-equal-grid data-stagger>
                 {pagedDeliveries.map((item) => (
-                  <DeliveryCard key={item.jobId} item={item} onDeleted={onDeleted} />
+                  <DeliveryCard
+                    key={item.jobId}
+                    item={item}
+                    onDeleted={onDeleted}
+                    selected={selectedIds.has(item.jobId)}
+                    onSelectChange={onSelectChange}
+                  />
                 ))}
               </div>
               <div
@@ -963,6 +1344,22 @@ export function DeliveriesPage() {
             封面优先 cover_16x9.jpg，缺失时回退 poster，再缺显示灰底占位；封面统一 object-cover 裁切并启用下拉懒加载。
           </p>
         </>
+      )}
+
+      {batchOpen && selectedItems.length > 0 && (
+        <BatchDeleteDialog
+          items={selectedItems}
+          busy={batchBusy}
+          progress={batchProgress}
+          failures={batchFailures}
+          onCancel={() => {
+            if (batchBusy) return
+            setBatchOpen(false)
+            setBatchFailures([])
+            setBatchProgress({ done: 0, total: 0 })
+          }}
+          onConfirm={confirmBatchDelete}
+        />
       )}
 
       <div
