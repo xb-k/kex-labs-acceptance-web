@@ -62,6 +62,7 @@ import { handleAgentLibraryRoute } from './agent-sync'
 import { handleDecisionsRoute } from './decisions'
 import { handleGeminiRoute } from './gemini'
 import { handlePoseLibraryRoute } from './pose-library'
+import { handlePromptEnhancerRoute } from './prompt-enhancer'
 import { handlePromptPresetsRoute } from './prompt-presets'
 import { handleScriptTemplatesRoute } from './script-templates-api'
 import { ollamaFetch } from './ollama'
@@ -4663,6 +4664,15 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       dataRoot: DATA_ROOT,
       readJson,
       atomicWriteJson,
+      readBody: readRequestBody,
+      authorize: (r) => authorizeTaskWrite(r),
+      sendJson
+    })
+    return
+  }
+
+  if (pathname === '/api/prompts/enhance') {
+    await handlePromptEnhancerRoute(req, res, pathname, {
       readBody: readRequestBody,
       authorize: (r) => authorizeTaskWrite(r),
       sendJson

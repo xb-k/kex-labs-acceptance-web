@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { deleteJson, getJson, HttpError, isAbortError, postJson, useLiveJson } from '../api'
 import type {
@@ -23,6 +23,7 @@ import {
   T2I_DENOISE,
   buildImageJobPayload,
   buildJobDeletePlan,
+  buildPromptEnhanceRequest,
   canCancelImageJob,
   canDeleteJob,
   formatJobDuration,
@@ -33,11 +34,15 @@ import {
   imageWaitStage,
   galleryPrimaryImage,
   galleryStatusLabel,
+  initialPromptEnhanceState,
   imageActionState,
+  promptEnhanceReducer,
   referencePanelState,
+  resolveSubmitFields,
   validateCoverTarget,
   validateImageForm
 } from '../image-workbench'
+import type { PromptEnhanceResponse } from '../image-workbench'
 import { uploadFileInChunks } from '../upload-client'
 
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp']
@@ -348,6 +353,7 @@ export function ImageWorkbench({
   const [mode, setMode] = useState<StudioImageMode>('t2i')
   const [prompt, setPrompt] = useState('')
   const [negative, setNegative] = useState('')
+  const [enhance, dispatchEnhance] = useReducer(promptEnhanceReducer, initialPromptEnhanceState)
   const [size, setSize] = useState(DEFAULT_IMAGE_SIZE)
   const [seed, setSeed] = useState(DEFAULT_SEED)
   const [steps, setSteps] = useState(DEFAULT_STEPS)
@@ -447,6 +453,35 @@ export function ImageWorkbench({
     }
   }
 
+  async function handlePreviewEnhance() {
+    const original = prompt.trim()
+    if (!original) {
+      dispatchEnhance({ type: 'preview_error', message: '请先填写原始 Prompt，再预览增强。' })
+      return
+    }
+    dispatchEnhance({ type: 'preview_start' })
+    try {
+      const result = await postJson<PromptEnhanceResponse>(
+        '/api/prompts/enhance',
+        buildPromptEnhanceRequest({ prompt, negative })
+      )
+      dispatchEnhance({
+        type: 'preview_success',
+        preview: {
+          prompt: result.prompt,
+          negative: result.negative,
+          scene: result.scene,
+          clauses: result.clauses
+        }
+      })
+    } catch (err) {
+      dispatchEnhance({
+        type: 'preview_error',
+        message: `增强失败：${requestErrorText(err)}；可直接用原文提交。`
+      })
+    }
+  }
+
   function clearReference() {
     setSourceUploadId(null)
     setSourceName(null)
@@ -470,10 +505,16 @@ export function ImageWorkbench({
       setFormError('参考图仍在上传，请等待完成。')
       return
     }
+    const fields = resolveSubmitFields({
+      enabled: enhance.enabled,
+      plainPrompt: prompt,
+      plainNegative: negative,
+      preview: enhance.preview
+    })
     const checked = validateImageForm({
       mode,
-      prompt,
-      negative,
+      prompt: fields.prompt,
+      negative: fields.negative,
       size,
       seed,
       steps,
@@ -619,6 +660,111 @@ export function ImageWorkbench({
               ))}
             </div>
           </fieldset>
+
+          <section
+            className="rounded-[12px] border border-black/[0.08] bg-apple-bg/40 p-3"
+            data-testid="prompt-enhance-panel"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="image-prompt-enhance"
+                className="flex items-center gap-2 text-[12px] font-medium text-apple-text"
+              >
+                <input
+                  id="image-prompt-enhance"
+                  type="checkbox"
+                  checked={enhance.enabled}
+                  onChange={(event) =>
+                    dispatchEnhance({ type: 'toggle', enabled: event.target.checked })
+                  }
+                  className="h-4 w-4 accent-apple-blue"
+                  data-testid="prompt-enhance-toggle"
+                />
+                一句话增强
+              </label>
+              <button
+                type="button"
+                onClick={handlePreviewEnhance}
+                disabled={enhance.loading}
+                className={`${quietButton} h-8 px-3 text-[11px] disabled:opacity-60`}
+                data-testid="prompt-enhance-preview"
+              >
+                {enhance.loading ? '增强中…' : '预览增强'}
+              </button>
+            </div>
+            <p className="mt-1.5 text-[10px] leading-relaxed text-apple-subtext">
+              默认开启：按原句自动补充镜头、光线、材质、色温与颗粒；预览后可编辑，关闭则按原文提交。
+            </p>
+            {enhance.error ? (
+              <p className="mt-2 text-[11px] text-red-600" data-testid="prompt-enhance-error">
+                {enhance.error}
+              </p>
+            ) : null}
+            {enhance.enabled && enhance.preview ? (
+              <div className="mt-3 space-y-2 border-t border-black/[0.08] pt-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] font-medium text-apple-subtext">
+                    原始白话（只读）
+                  </span>
+                  <span
+                    className="rounded-full bg-white px-2 py-0.5 text-[10px] text-apple-subtext"
+                    data-testid="prompt-enhance-scene"
+                  >
+                    场景：{enhance.preview.scene} · {enhance.preview.clauses.length} 条增强
+                  </span>
+                </div>
+                <textarea
+                  readOnly
+                  value={prompt}
+                  rows={2}
+                  className={`${inputClass} h-auto min-h-[52px] py-2 leading-relaxed`}
+                  data-testid="prompt-enhance-original"
+                />
+                <label
+                  htmlFor="image-prompt-enhanced"
+                  className="block text-[11px] font-medium text-apple-subtext"
+                >
+                  增强后 Prompt（可编辑）
+                </label>
+                <textarea
+                  id="image-prompt-enhanced"
+                  value={enhance.preview.prompt}
+                  onChange={(event) =>
+                    dispatchEnhance({ type: 'edit_prompt', value: event.target.value })
+                  }
+                  rows={4}
+                  className={`${inputClass} h-auto min-h-[88px] py-2 leading-relaxed`}
+                  data-testid="prompt-enhance-text"
+                />
+                <label
+                  htmlFor="image-negative-enhanced"
+                  className="block text-[11px] font-medium text-apple-subtext"
+                >
+                  合并后 Negative（可编辑）
+                </label>
+                <input
+                  id="image-negative-enhanced"
+                  type="text"
+                  value={enhance.preview.negative}
+                  onChange={(event) =>
+                    dispatchEnhance({ type: 'edit_negative', value: event.target.value })
+                  }
+                  className={inputClass}
+                  data-testid="prompt-enhance-negative"
+                />
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => dispatchEnhance({ type: 'reset' })}
+                    className="text-[10px] font-medium text-apple-blueInk underline underline-offset-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/45"
+                    data-testid="prompt-enhance-reset"
+                  >
+                    回退原文
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </section>
 
           <Field id="image-prompt" label="Prompt" hint="描述画面主体、风格与镜头；必填。">
             <textarea

@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { ImageJobTracker } from './components/ImageWorkbench'
+import { ImageJobTracker, ImageWorkbench } from './components/ImageWorkbench'
 import {
   IMAGE_SIZES,
   KEYFRAME_ONLY_HINT,
   buildAigcJobPayload,
   buildImageJobPayload,
+  buildPromptEnhanceRequest,
   buildJobDeletePlan,
   canCancelImageJob,
   canDeleteJob,
@@ -21,7 +22,10 @@ import {
   galleryStatusLabel,
   hasAigcSource,
   imageActionState,
+  initialPromptEnhanceState,
+  promptEnhanceReducer,
   referencePanelState,
+  resolveSubmitFields,
   validateCoverTarget,
   validateImageForm
 } from './image-workbench'
@@ -397,4 +401,99 @@ test('#112 清除参考图 / 上传中：状态归零且不可清除', () => {
   assert.equal(busy.canUpload, false)
   assert.equal(busy.canClear, false)
   assert.equal(busy.showReady, true)
+})
+
+
+// ---------------------------------------------------------------------------
+// #160 一句话增强：SSR 开关 / 预览 / 编辑后提交 / 失败回退
+// ---------------------------------------------------------------------------
+
+test('#160 SSR：默认开启「一句话增强」，初始只有预览按钮，没有增强文本区', () => {
+  const html = renderToStaticMarkup(
+    createElement(ImageWorkbench, { jobOptions: [], onUseKeyframe: () => undefined })
+  )
+  assert.match(html, /data-testid="prompt-enhance-panel"/)
+  assert.match(html, /一句话增强/)
+  assert.match(html, /data-testid="prompt-enhance-toggle"[^>]*checked=""/)
+  assert.match(html, /data-testid="prompt-enhance-preview"[^>]*>预览增强</)
+  assert.doesNotMatch(html, /data-testid="prompt-enhance-text"/)
+  assert.doesNotMatch(html, /data-testid="prompt-enhance-error"/)
+})
+
+test('#160 交互：开关 → 预览 → 编辑 → 提交用编辑后的增强文本', () => {
+  let state = initialPromptEnhanceState
+  state = promptEnhanceReducer(state, { type: 'toggle', enabled: true })
+  state = promptEnhanceReducer(state, { type: 'preview_start' })
+  assert.equal(state.loading, true)
+
+  state = promptEnhanceReducer(state, {
+    type: 'preview_success',
+    preview: {
+      prompt: '雪山日出，24mm 广角镜头，5600K 中性色温',
+      negative: '3d render, cgi',
+      scene: '自然',
+      clauses: ['24mm 广角镜头', '5600K 中性色温']
+    }
+  })
+  assert.equal(state.loading, false)
+  assert.equal(state.preview?.scene, '自然')
+  assert.equal(state.error, null)
+
+  state = promptEnhanceReducer(state, {
+    type: 'edit_prompt',
+    value: '雪山日出，24mm 广角镜头（人工调整）'
+  })
+  state = promptEnhanceReducer(state, { type: 'edit_negative', value: '3d render, 水印' })
+  assert.deepEqual(
+    resolveSubmitFields({
+      enabled: state.enabled,
+      plainPrompt: '雪山日出',
+      plainNegative: '低清',
+      preview: state.preview
+    }),
+    { prompt: '雪山日出，24mm 广角镜头（人工调整）', negative: '3d render, 水印' }
+  )
+})
+
+test('#160 交互：关闭开关 / 预览失败都回退原文，原始白话不丢', () => {
+  const success = promptEnhanceReducer(initialPromptEnhanceState, {
+    type: 'preview_success',
+    preview: { prompt: '增强后', negative: 'negative', scene: '自然', clauses: ['增强后'] }
+  })
+  assert.deepEqual(
+    resolveSubmitFields({
+      enabled: false,
+      plainPrompt: '原始白话',
+      plainNegative: '低清',
+      preview: success.preview
+    }),
+    { prompt: '原始白话', negative: '低清' }
+  )
+
+  const failed = promptEnhanceReducer(success, {
+    type: 'preview_error',
+    message: '增强失败：HTTP 500；可直接用原文提交。'
+  })
+  assert.equal(failed.preview, null)
+  assert.match(failed.error ?? '', /可直接用原文提交/)
+  assert.deepEqual(
+    resolveSubmitFields({
+      enabled: true,
+      plainPrompt: '原始白话',
+      plainNegative: '低清',
+      preview: failed.preview
+    }),
+    { prompt: '原始白话', negative: '低清' }
+  )
+
+  const reset = promptEnhanceReducer(success, { type: 'reset' })
+  assert.equal(reset.preview, null)
+  assert.equal(reset.error, null)
+})
+
+test('#160 预览请求体：原始白话与 negative 去首尾空白，交给后端合并', () => {
+  assert.deepEqual(buildPromptEnhanceRequest({ prompt: '  雪山日出  ', negative: ' 低清 ' }), {
+    prompt: '雪山日出',
+    negative: '低清'
+  })
 })

@@ -25,6 +25,96 @@ export const DEFAULT_SEED = '0'
 export const DEFAULT_EDIT_DENOISE = '0.6'
 export const T2I_DENOISE = '1'
 
+// ---------------------------------------------------------------------------
+// #160 一句话增强：预览状态机 + 提交口径（组件与 node:test 共用）
+// ---------------------------------------------------------------------------
+
+export type PromptEnhancePreview = {
+  prompt: string
+  negative: string
+  scene: string
+  clauses: string[]
+}
+
+export type PromptEnhanceResponse = PromptEnhancePreview & {
+  source: 'rules'
+  version: 'v1'
+}
+
+export type PromptEnhanceState = {
+  enabled: boolean
+  loading: boolean
+  preview: PromptEnhancePreview | null
+  error: string | null
+}
+
+export const initialPromptEnhanceState: PromptEnhanceState = {
+  enabled: true,
+  loading: false,
+  preview: null,
+  error: null
+}
+
+export type PromptEnhanceAction =
+  | { type: 'toggle'; enabled: boolean }
+  | { type: 'preview_start' }
+  | { type: 'preview_success'; preview: PromptEnhancePreview }
+  | { type: 'preview_error'; message: string }
+  | { type: 'edit_prompt'; value: string }
+  | { type: 'edit_negative'; value: string }
+  | { type: 'reset' }
+
+export function promptEnhanceReducer(
+  state: PromptEnhanceState,
+  action: PromptEnhanceAction
+): PromptEnhanceState {
+  switch (action.type) {
+    case 'toggle':
+      return { ...state, enabled: action.enabled }
+    case 'preview_start':
+      return { ...state, loading: true, error: null }
+    case 'preview_success':
+      return { ...state, loading: false, preview: action.preview, error: null }
+    case 'preview_error':
+      // 失败时清掉旧预览，提交自动回退到原始白话。
+      return { ...state, loading: false, preview: null, error: action.message }
+    case 'edit_prompt':
+      return state.preview
+        ? { ...state, preview: { ...state.preview, prompt: action.value } }
+        : state
+    case 'edit_negative':
+      return state.preview
+        ? { ...state, preview: { ...state.preview, negative: action.value } }
+        : state
+    case 'reset':
+      return { ...state, preview: null, error: null, loading: false }
+  }
+}
+
+/** 预览请求体：原始白话 + 用户 negative（后端合并全局默认 negative）。 */
+export function buildPromptEnhanceRequest(input: {
+  prompt: string
+  negative: string
+}): { prompt: string; negative: string } {
+  return { prompt: input.prompt.trim(), negative: input.negative.trim() }
+}
+
+/**
+ * 提交口径：开关关闭或没有成功预览时用原文；有预览时用（可能已编辑的）增强文本。
+ * 原始白话始终留在组件 state，不因预览/提交被覆盖。
+ */
+export function resolveSubmitFields(input: {
+  enabled: boolean
+  plainPrompt: string
+  plainNegative: string
+  preview: PromptEnhancePreview | null
+}): { prompt: string; negative: string } {
+  if (!input.enabled || !input.preview) {
+    return { prompt: input.plainPrompt, negative: input.plainNegative }
+  }
+  return { prompt: input.preview.prompt, negative: input.preview.negative }
+}
+
 export type ImageFormInput = {
   mode: StudioImageMode
   prompt: string
