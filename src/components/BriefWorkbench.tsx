@@ -7,9 +7,15 @@ import type {
   StudioPolished,
   StudioShot
 } from '../types'
+import {
+  formatPromptPresetError,
+  validatePromptPresetReference,
+  type PromptPresetReference
+} from '../prompt-presets'
 import { SelectMenu } from './SelectMenu'
 import { AsyncStatusLine } from './ui'
 import { ASPECTS, Field, inputClass, primaryButton, quietButton } from './studio-ui'
+import { PromptPresetsPanel } from './studio/PromptPresetsPanel'
 
 /*
  * Brief 工作台（#87 §2 UI 契约）：想法 → 润色（真调本地模型）→ 追问 → 前后对比 →
@@ -227,6 +233,7 @@ export function BriefWorkbench({
 }) {
   const [current, setCurrent] = useState<StudioBrief | null>(brief)
   const [idea, setIdea] = useState(brief?.idea ?? '')
+  const [presetReference, setPresetReference] = useState<PromptPresetReference | null>(null)
   const [audience, setAudience] = useState(brief?.audience ?? '')
   const [duration, setDuration] = useState(brief?.duration_s != null ? String(brief.duration_s) : '')
   const [aspect, setAspect] = useState(brief?.aspect ?? '')
@@ -297,7 +304,18 @@ export function BriefWorkbench({
     setPolishStartedAt(Date.now())
     setPolishStage(0)
     setBusy('polish')
+    let referenceChecked = !presetReference
     try {
+      // #137 生成前校验模板引用：失败原样提示，不静默回退 current。
+      if (presetReference) {
+        await validatePromptPresetReference(
+          presetReference.presetId,
+          presetReference.version,
+          controller.signal
+        )
+        referenceChecked = true
+        setPolishStage(1)
+      }
       let base = current
       if (!base) {
         base = await postJson<StudioBrief>('/api/studio/briefs', fieldsPayload(fields), controller.signal)
@@ -310,13 +328,13 @@ export function BriefWorkbench({
         )
         applyBrief(base)
       }
-      setPolishStage(1)
+      setPolishStage(presetReference ? 2 : 1)
       const result = await postJson<StudioBriefPolishResponse>(
         `/api/studio/briefs/${encodeURIComponent(base.id)}/polish`,
         {},
         controller.signal
       )
-      setPolishStage(2)
+      setPolishStage(presetReference ? 3 : 2)
       setIdea(result.brief.idea)
       setAudience(result.brief.audience ?? '')
       setDuration(result.brief.duration_s != null ? String(result.brief.duration_s) : '')
@@ -335,6 +353,11 @@ export function BriefWorkbench({
     } catch (err) {
       if (isAbortError(err)) {
         setNote('已取消润色')
+      } else if (!referenceChecked && presetReference) {
+        setFailure({
+          title: '模板引用校验失败',
+          detail: formatPromptPresetError(err)
+        })
       } else {
         setFailure(describeFailure(err))
       }
@@ -537,12 +560,23 @@ export function BriefWorkbench({
         </Field>
       </div>
 
+      <PromptPresetsPanel
+        prompt={idea}
+        reference={presetReference}
+        onReferenceChange={setPresetReference}
+        onApplyPrompt={setIdea}
+      />
+
       {busy === 'polish' && (
         <AsyncStatusLine
           testId="brief-polish-status"
           label="本地模型正在润色 Brief"
           startedAt={polishStartedAt}
-          stages={['提交想法', '模型润色', '整理分镜']}
+          stages={
+            presetReference
+              ? ['校验模板引用', '提交想法', '模型润色', '整理分镜']
+              : ['提交想法', '模型润色', '整理分镜']
+          }
           stage={polishStage}
           detail="最长 120 秒"
           onCancel={cancelPolish}
