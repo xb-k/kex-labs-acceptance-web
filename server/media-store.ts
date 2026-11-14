@@ -32,9 +32,20 @@ export type MediaItem = {
   kind: MediaKind
 }
 
+/** Request provenance copied into `media-delete.jsonl` (#168). */
+export type MediaDeleteAuditContext = {
+  request_id: string
+  ip: string
+  ua: string | null
+  route: string
+  method: string
+}
+
 export type MediaStoreOptions = {
   dataRoot?: string
   readJson?: (file: string) => any | null
+  /** Optional request context; direct library callers (tests) may omit it. */
+  audit?: MediaDeleteAuditContext
 }
 
 export type MediaResult<T> =
@@ -188,12 +199,13 @@ export function resolveMedia(
 
 function auditDelete(
   root: string,
-  entry: { job: string; name: string; size: number }
+  entry: { job: string; name: string; size: number },
+  audit?: MediaDeleteAuditContext
 ): void {
   try {
     fs.appendFileSync(
       path.join(root, 'media-delete.jsonl'),
-      `${JSON.stringify({ ...entry, at: new Date().toISOString() })}\n`,
+      `${JSON.stringify({ ...entry, ...(audit ?? {}), at: new Date().toISOString() })}\n`,
       'utf8'
     )
   } catch {
@@ -235,7 +247,7 @@ export function deleteMedia(
   } catch {
     /* non-empty or already gone */
   }
-  auditDelete(root, { job: value.job_id, name: value.name, size: value.stat.size })
+  auditDelete(root, { job: value.job_id, name: value.name, size: value.stat.size }, opts.audit)
   return {
     ok: true,
     value: {

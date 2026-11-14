@@ -85,6 +85,12 @@ import {
   mediaJobExists,
   resolveMedia
 } from './media-store'
+import type { MediaDeleteAuditContext } from './media-store'
+import {
+  consumeMediaDelete,
+  defaultMediaDeleteGuard
+} from './media-delete-guard'
+import type { MediaDeleteGuard } from './media-delete-guard'
 import { appendTombstoneAudit, isTombstoned, readTombstones, tombstone } from './tombstones'
 
 const DATA_ROOT = process.env.WEB_DATA_ROOT
@@ -4302,6 +4308,31 @@ async function handleTaskReconcile(req: IncomingMessage, url: URL, res: ServerRe
 export type MediaRouteDeps = {
   dataRoot?: string
   env?: NodeJS.ProcessEnv
+  /** Per-process physical-delete budget; tests inject/reset their own (#168). */
+  deleteGuard?: MediaDeleteGuard
+}
+
+/** Audit provenance attached to every physical delete and tombstone row (#168). */
+function mediaDeleteAuditContext(
+  req: IncomingMessage,
+  route: string
+): MediaDeleteAuditContext {
+  const header = (name: string): string | null => {
+    const raw = req.headers[name]
+    const value = Array.isArray(raw) ? raw[0] : raw
+    if (typeof value !== 'string') return null
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  const forwarded = header('x-forwarded-for')
+  const ip = (forwarded ? forwarded.split(',')[0].trim() : '') || req.socket?.remoteAddress || 'unknown'
+  return {
+    request_id: header('x-request-id') ?? crypto.randomUUID(),
+    ip,
+    ua: header('user-agent'),
+    route,
+    method: req.method ?? 'unknown'
+  }
 }
 
 const MEDIA_JOB_FILE_RE = /^\/api\/media\/jobs\/([^/]+)\/([^/]+)$/
@@ -4388,9 +4419,18 @@ export function handleMediaRoute(
     return true
   }
 
+  // #168 P0: 152 files were physically deleted in ~300ms by a runaway client.
+  // Cap accepted attempts per process; rejected calls never touch the FS.
+  const guard = deps.deleteGuard ?? defaultMediaDeleteGuard
+  if (!consumeMediaDelete(guard)) {
+    sendJson(res, 429, { error: 'too many media deletes; retry later' })
+    return true
+  }
+
+  const audit = mediaDeleteAuditContext(req, pathname)
   let deleted
   try {
-    deleted = deleteMedia(match[1], match[2], { dataRoot })
+    deleted = deleteMedia(match[1], match[2], { dataRoot, audit })
   } catch (err) {
     sendJson(res, 500, { error: err instanceof Error ? err.message : 'delete failed' })
     return true
@@ -4403,7 +4443,12 @@ export function handleMediaRoute(
   if (deleted.value.jobDirRemoved) {
     const files = [deleted.value.path]
     tombstone(deleted.value.job_id, 'media', files, { dataRoot })
-    appendTombstoneAudit(dataRoot, { job: deleted.value.job_id, source: 'media', files })
+    appendTombstoneAudit(dataRoot, {
+      job: deleted.value.job_id,
+      source: 'media',
+      files,
+      ...audit
+    })
   }
   sendJson(res, 200, {
     ok: true,
@@ -4460,9 +4505,10 @@ export function handleDeliveryDelete(
   const mediaPrefixed = id.startsWith('media:')
   const mediaJob = mediaPrefixed ? id.slice('media:'.length) : id
   if (mediaPrefixed || mediaJobExists(mediaJob, { dataRoot })) {
+    const audit = mediaDeleteAuditContext(req, pathname)
     let deleted
     try {
-      deleted = deleteMediaJob(mediaJob, { dataRoot })
+      deleted = deleteMediaJob(mediaJob, { dataRoot, audit })
     } catch (err) {
       sendJson(res, 500, { error: err instanceof Error ? err.message : 'delete failed' })
       return true
@@ -4478,7 +4524,7 @@ export function handleDeliveryDelete(
     }
     const files = deleted.value.files.map((name) => path.posix.join('media', 'jobs', mediaJob, name))
     tombstone(mediaJob, 'delivery', files, { dataRoot })
-    appendTombstoneAudit(dataRoot, { job: mediaJob, source: 'delivery', files })
+    appendTombstoneAudit(dataRoot, { job: mediaJob, source: 'delivery', files, ...audit })
     sendJson(res, 200, {
       ok: true,
       jobId: mediaJob,

@@ -251,6 +251,23 @@ export function batchDeleteCopy(count: number): { title: string; body: string } 
   }
 }
 
+/** #168 P0：单次批量物理删除上限，与服务端 60s/20 次护栏同量级。 */
+export const BATCH_DELETE_LIMIT = 20
+
+/** 超过上限时对话框直接报错并禁用确认，避免逐条打满服务端护栏。 */
+export function batchDeleteLimit(count: number): {
+  overLimit: boolean
+  error: string | null
+  disabled: boolean
+} {
+  const overLimit = count > BATCH_DELETE_LIMIT
+  return {
+    overLimit,
+    error: overLimit ? `一次最多删除 ${BATCH_DELETE_LIMIT} 个，请分批` : null,
+    disabled: count === 0 || overLimit
+  }
+}
+
 export function failedSelection(results: readonly BatchDeleteResult[]): Set<string> {
   return new Set(
     results.filter((result): result is Extract<BatchDeleteResult, { ok: false }> => !result.ok).map(
@@ -473,28 +490,31 @@ function DeleteDialog({
   )
 }
 
-/** 批量删除确认：列出 jobId（≤10）与总大小；串行删除进度与逐条失败原因都留在框内。 */
-function BatchDeleteDialog({
-  items,
-  busy,
-  progress,
-  failures,
-  onCancel,
-  onConfirm
-}: {
+export type BatchDeleteDialogProps = {
   items: Delivery[]
   busy: boolean
   progress: { done: number; total: number }
   failures: DeliveryDeleteFailure[]
   onCancel: () => void
   onConfirm: () => void
-}) {
+}
+
+/** 批量删除确认：列出 jobId（≤10）与总大小；串行删除进度与逐条失败原因都留在框内。 */
+export function BatchDeleteDialogContent({
+  items,
+  busy,
+  progress,
+  failures,
+  onCancel,
+  onConfirm
+}: BatchDeleteDialogProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const titleId = useId()
   const descId = useId()
   const summary = batchDeleteSummary(items)
   const copy = batchDeleteCopy(summary.jobIds.length)
+  const limit = batchDeleteLimit(summary.jobIds.length)
   const retry = failures.length > 0
   const close = useCallback(() => {
     if (!busy) onCancel()
@@ -502,7 +522,7 @@ function BatchDeleteDialog({
 
   useModalA11y(true, panelRef, close, cancelRef)
 
-  return createPortal(
+  return (
     <div
       className="dialog-overlay fixed inset-0 z-[70] flex items-end justify-center bg-apple-text/30 backdrop-blur-[2px] sm:items-center sm:p-4"
       onMouseDown={(event) => {
@@ -524,6 +544,15 @@ function BatchDeleteDialog({
         <p id={descId} className="mt-1.5 text-sm leading-relaxed text-apple-subtext">
           {copy.body}
         </p>
+        {limit.error && (
+          <p
+            role="alert"
+            data-testid="delivery-batch-delete-limit-error"
+            className="mt-3 rounded-lg bg-[#FCEDEB] px-3 py-2 text-xs font-medium leading-relaxed text-[#B3261E] ring-1 ring-inset ring-[#F3D3CF]"
+          >
+            {limit.error}
+          </p>
+        )}
         <ul
           data-testid="delivery-batch-delete-ids"
           className="num mt-3 max-h-40 space-y-0.5 overflow-y-auto rounded-xl bg-apple-bg px-3 py-2.5 text-xs"
@@ -588,7 +617,7 @@ function BatchDeleteDialog({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={busy || summary.jobIds.length === 0}
+            disabled={busy || limit.disabled}
             aria-busy={busy}
             data-testid="delivery-batch-delete-confirm"
             className="press inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#B3261E] px-3.5 text-xs font-medium text-white transition-colors hover:bg-[#98200F] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B3261E]/50 disabled:opacity-60"
@@ -602,9 +631,13 @@ function BatchDeleteDialog({
           </button>
         </div>
       </div>
-    </div>,
-    document.body
+    </div>
   )
+}
+
+/** 用 portal 挂到 body，避免被卡片 overflow 裁切。 */
+function BatchDeleteDialog(props: BatchDeleteDialogProps) {
+  return createPortal(<BatchDeleteDialogContent {...props} />, document.body)
 }
 
 /**
@@ -1072,7 +1105,7 @@ export function DeliveriesPage() {
   const confirmBatchDelete = useCallback(async () => {
     if (batchBusy) return
     const ids = selectedItems.map((item) => item.jobId)
-    if (ids.length === 0) return
+    if (ids.length === 0 || ids.length > BATCH_DELETE_LIMIT) return
     setBatchBusy(true)
     setBatchFailures([])
     setBatchProgress({ done: 0, total: ids.length })

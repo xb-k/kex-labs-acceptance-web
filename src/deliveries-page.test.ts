@@ -4,7 +4,10 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   allVisibleSelected,
+  BATCH_DELETE_LIMIT,
   batchDeleteCopy,
+  batchDeleteLimit,
+  BatchDeleteDialogContent,
   batchDeleteSummary,
   DeliveriesPage,
   DeliveryCard,
@@ -189,4 +192,48 @@ test('#159 SSR：选中卡片渲染 checkbox（aria-label），交付页可服�
   )
   assert.match(page, /交付与资产/)
   assert.match(page, /正在读取交付/)
+})
+
+function confirmButtonTag(html: string): string {
+  const match = html.match(/<button[^>]*data-testid="delivery-batch-delete-confirm"[^>]*>/)
+  assert.ok(match, 'expected batch delete confirm button')
+  return match[0]
+}
+
+function batchDialogProps(count: number) {
+  return {
+    items: Array.from({ length: count }, (_, index) => delivery({ jobId: `job-${index}` })),
+    busy: false,
+    progress: { done: 0, total: 0 },
+    failures: [],
+    onCancel: () => {},
+    onConfirm: () => {}
+  }
+}
+
+test('#168 批量删除上限：21 个选中禁用确认并提示分批，20 个可用', () => {
+  assert.equal(BATCH_DELETE_LIMIT, 20)
+
+  const over = batchDeleteLimit(21)
+  assert.equal(over.overLimit, true)
+  assert.equal(over.disabled, true)
+  assert.match(over.error ?? '', /一次最多删除 20 个，请分批/)
+
+  const atLimit = batchDeleteLimit(20)
+  assert.equal(atLimit.overLimit, false)
+  assert.equal(atLimit.disabled, false)
+  assert.equal(atLimit.error, null)
+
+  const overHtml = renderToStaticMarkup(
+    createElement(BatchDeleteDialogContent, batchDialogProps(21))
+  )
+  assert.match(overHtml, /data-testid="delivery-batch-delete-limit-error"/)
+  assert.match(overHtml, /一次最多删除 20 个，请分批/)
+  assert.match(confirmButtonTag(overHtml), /disabled=""/)
+
+  const okHtml = renderToStaticMarkup(
+    createElement(BatchDeleteDialogContent, batchDialogProps(20))
+  )
+  assert.doesNotMatch(okHtml, /data-testid="delivery-batch-delete-limit-error"/)
+  assert.doesNotMatch(confirmButtonTag(okHtml), /disabled=""/)
 })

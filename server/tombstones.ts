@@ -13,6 +13,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import type { MediaDeleteAuditContext } from './media-store'
 
 export type TombstoneSource = 'delivery' | 'media' | 'job'
 
@@ -170,18 +171,21 @@ export function tombstone(
 /** Diagnostic line appended to `media-delete.jsonl` next to the per-file rows. */
 export function appendTombstoneAudit(
   dataRoot: string,
-  entry: { job: string; source: TombstoneSource; files: string[] }
+  entry: { job: string; source: TombstoneSource; files: string[] } &
+    Partial<MediaDeleteAuditContext>
 ): void {
+  const { job, source, files, ...context } = entry
   try {
     fs.mkdirSync(dataRoot, { recursive: true })
     fs.appendFileSync(
       path.join(dataRoot, 'media-delete.jsonl'),
       `${JSON.stringify({
-        job: entry.job,
-        source: entry.source,
-        files: entry.files,
-        fileCount: entry.files.length,
+        job,
+        source,
+        files,
+        fileCount: files.length,
         action: 'tombstone',
+        ...context,
         at: new Date().toISOString()
       })}\n`,
       'utf8'

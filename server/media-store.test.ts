@@ -23,6 +23,12 @@ import {
   mediaJobExists,
   resolveMedia
 } from './media-store'
+import {
+  consumeMediaDelete,
+  createMediaDeleteGuard,
+  defaultMediaDeleteGuard,
+  resetMediaDeleteGuard
+} from './media-delete-guard'
 
 const TOKEN = 'media-store-test-token'
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'media-store-'))
@@ -228,7 +234,12 @@ test('GET 文件支持 Range 206；DELETE 需鉴权并物理删 + 审计', async
 
   const deleted = await fetch(`${base}/api/media/jobs/route-file/clip.mp4`, {
     method: 'DELETE',
-    headers: { 'x-web-token': TOKEN }
+    headers: {
+      'x-web-token': TOKEN,
+      'x-request-id': 'req-168-audit',
+      'x-forwarded-for': '203.0.113.9, 10.0.0.1',
+      'user-agent': 'audit-test/1.0'
+    }
   })
   assert.equal(deleted.status, 200)
   const body: any = await deleted.json()
@@ -238,7 +249,25 @@ test('GET 文件支持 Range 206；DELETE 需鉴权并物理删 + 审计', async
   assert.equal(body.name, 'clip.mp4')
   assert.equal(body.bytes, 8)
   assert.equal(fs.existsSync(file), false)
-  assert.ok(auditLines().some((line) => line.job === 'route-file' && line.name === 'clip.mp4'))
+  const perFile = auditLines().find(
+    (line) => line.job === 'route-file' && line.name === 'clip.mp4'
+  )
+  assert.ok(perFile, 'expected per-file audit row')
+  assert.equal(perFile.request_id, 'req-168-audit')
+  assert.equal(perFile.ip, '203.0.113.9')
+  assert.equal(perFile.ua, 'audit-test/1.0')
+  assert.equal(perFile.route, '/api/media/jobs/route-file/clip.mp4')
+  assert.equal(perFile.method, 'DELETE')
+
+  const tombstoneRow = auditLines().find(
+    (line) => line.job === 'route-file' && line.action === 'tombstone'
+  )
+  assert.ok(tombstoneRow, 'expected tombstone audit row')
+  assert.equal(tombstoneRow.request_id, 'req-168-audit')
+  assert.equal(tombstoneRow.ip, '203.0.113.9')
+  assert.equal(tombstoneRow.ua, 'audit-test/1.0')
+  assert.equal(tombstoneRow.route, '/api/media/jobs/route-file/clip.mp4')
+  assert.equal(tombstoneRow.method, 'DELETE')
 
   const gone = await fetch(`${base}/api/media/jobs/route-file/clip.mp4`)
   assert.equal(gone.status, 404)
@@ -333,4 +362,54 @@ test('DELETE /api/deliveries/:id：media 前缀/media job 物理删，旧 b-trac
   const legacyBody: any = await legacy.json()
   assert.match(legacyBody.movedTo, /^\.trash\/deliveries\/legacy-/)
   assert.equal(fs.existsSync(path.join(oldOut, 'final.mp4')), false)
+})
+
+test('#168 滑动窗口：限额内放行，满额拒绝，过期后恢复', () => {
+  const guard = createMediaDeleteGuard({ limit: 3, windowMs: 1000 })
+  assert.equal(consumeMediaDelete(guard, 1000), true)
+  assert.equal(consumeMediaDelete(guard, 1200), true)
+  assert.equal(consumeMediaDelete(guard, 1400), true)
+  assert.equal(consumeMediaDelete(guard, 1500), false, '4th attempt inside window is rejected')
+  assert.equal(consumeMediaDelete(guard, 1600), false, 'rejected attempts do not extend the budget')
+  assert.equal(consumeMediaDelete(guard, 2001), true, 'oldest hit expires at window edge')
+  assert.equal(consumeMediaDelete(guard, 2002), false, 'later hits still count')
+  assert.equal(consumeMediaDelete(guard, 2201), true, 'the next hit expires in turn')
+  assert.equal(consumeMediaDelete(guard, 2403), true)
+  assert.equal(consumeMediaDelete(guard, 2404), false, 'budget refills one hit at a time')
+})
+
+test('#168 DELETE /api/media/jobs：前 20 次物理删成功，第 21 次 429 且不碰文件', async () => {
+  resetMediaDeleteGuard(defaultMediaDeleteGuard)
+  const names = Array.from({ length: 21 }, (_, index) => `rate-${index}.mp4`)
+  for (const name of names) seedMedia('rate-job', name, 1)
+
+  for (let index = 0; index < 20; index += 1) {
+    const res = await fetch(`${base}/api/media/jobs/rate-job/${names[index]}`, {
+      method: 'DELETE',
+      headers: { 'x-web-token': TOKEN }
+    })
+    assert.equal(res.status, 200, `delete #${index + 1} should pass`)
+    const body: any = await res.json()
+    assert.equal(body.deleted, true)
+  }
+
+  const blocked = await fetch(`${base}/api/media/jobs/rate-job/${names[20]}`, {
+    method: 'DELETE',
+    headers: { 'x-web-token': TOKEN }
+  })
+  assert.equal(blocked.status, 429)
+  assert.deepEqual(await blocked.json(), { error: 'too many media deletes; retry later' })
+  assert.equal(
+    fs.existsSync(path.join(root, 'media', 'jobs', 'rate-job', names[20])),
+    true,
+    '429 must not unlink the file'
+  )
+  assert.ok(!auditLines().some((line) => line.name === names[20]))
+
+  resetMediaDeleteGuard(defaultMediaDeleteGuard)
+  const allowed = await fetch(`${base}/api/media/jobs/rate-job/${names[20]}`, {
+    method: 'DELETE',
+    headers: { 'x-web-token': TOKEN }
+  })
+  assert.equal(allowed.status, 200, 'reset restores the budget')
 })
