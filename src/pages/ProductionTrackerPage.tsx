@@ -29,6 +29,15 @@ import {
 } from '../components/icons'
 import { formatClockMs, formatGb } from '../format'
 import {
+  decisionParamChips,
+  decisionRawText,
+  decisionResultSummary,
+  decisionSummary,
+  decisionTone,
+  parseDecision,
+  type DecisionTone
+} from '../production-decisions'
+import {
   MEDIA_JOBS_TRACKER_URL,
   mediaItemsOf,
   resolveStageArtifacts,
@@ -73,6 +82,84 @@ function hostPort(value: string | null | undefined): string {
   } catch {
     return value
   }
+}
+
+const DECISION_TONE_CLASS: Record<DecisionTone, { badge: string; status: string; dot: string }> = {
+  success: { badge: 'bg-[#EAF8EE] text-[#1E7A3C]', status: 'text-[#1E7A3C]', dot: 'bg-[#30A14E]' },
+  warn: { badge: 'bg-[#FFF3E4] text-[#B25E00]', status: 'text-[#B25E00]', dot: 'bg-[#C77700]' },
+  fail: { badge: 'bg-[#FDF2F1] text-[#B3261E]', status: 'text-[#B3261E]', dot: 'bg-[#FF3B30]' },
+  neutral: { badge: 'bg-[#F5F5F7] text-apple-subtext', status: 'text-apple-subtext', dot: 'bg-[#8E8E93]' }
+}
+
+function formatDecisionDuration(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
+}
+
+function decisionRoleOf(dec: unknown): string {
+  return parseDecision(dec)?.role ?? 'orchestrator'
+}
+
+/** #162：单条决策卡片。raw JSON 默认收进 `<details>`，正文只展示解析后的字段。 */
+export function DecisionCard({ raw }: { raw: unknown }) {
+  const dec = parseDecision(raw)
+  const tone = DECISION_TONE_CLASS[decisionTone(dec?.status ?? null)]
+  const summary = decisionSummary(dec) || '未记录动作'
+  const params = decisionParamChips(dec)
+  const result = decisionResultSummary(dec)
+  return (
+    <div className="flex flex-col gap-2 py-3 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${tone.badge}`}>
+          {dec?.role ?? 'orchestrator'}
+        </span>
+        <span className="min-w-0 flex-1 break-words font-medium text-apple-text">{summary}</span>
+        {dec?.status && (
+          <span className={`inline-flex shrink-0 items-center gap-1 text-[11px] font-medium ${tone.status}`}>
+            <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />
+            {dec.status}
+          </span>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-apple-subtext">
+        {dec?.tool && (
+          <span>
+            工具 <span className="font-mono text-apple-text">{dec.tool}</span>
+          </span>
+        )}
+        {dec?.duration != null && <span className="num">耗时 {formatDecisionDuration(dec.duration)}</span>}
+        <span className="num">{formatTime(dec?.timestamp ?? null)}</span>
+      </div>
+      {params.labels.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          {params.labels.map((label, index) => (
+            <span
+              key={`${index}-${label}`}
+              className="rounded-md bg-[#F5F5F7] px-1.5 py-0.5 font-mono text-[10.5px] text-apple-subtext"
+            >
+              {label}
+            </span>
+          ))}
+          {params.extra > 0 && (
+            <span className="px-1 text-[10.5px] text-apple-subtext">+{params.extra}</span>
+          )}
+        </div>
+      )}
+      {result && (
+        <div className="break-words text-[11.5px] text-apple-subtext">
+          <span className="font-medium text-apple-text">结果摘要：</span>
+          {result}
+        </div>
+      )}
+      <details>
+        <summary className="w-fit cursor-pointer select-none text-[11px] font-medium text-apple-blueInk hover:underline">
+          原始数据
+        </summary>
+        <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md bg-[#F5F5F7] p-2 font-mono text-[10.5px] leading-relaxed text-apple-subtext">
+          {decisionRawText(raw)}
+        </pre>
+      </details>
+    </div>
+  )
 }
 
 export function ProductionTrackerPage() {
@@ -200,19 +287,13 @@ export function ProductionTrackerPage() {
   const decisions = job?.decisions ?? []
   const decisionRoles = useMemo(() => {
     const roles = new Set<string>()
-    for (const dec of decisions) {
-      const role = typeof dec?.role === 'string' && dec.role.trim() ? dec.role.trim() : 'orchestrator'
-      roles.add(role)
-    }
+    for (const dec of decisions) roles.add(decisionRoleOf(dec))
     return Array.from(roles)
   }, [decisions])
 
   const filteredDecisions = useMemo(() => {
     if (decisionRoleFilter === 'all') return decisions
-    return decisions.filter((dec) => {
-      const role = typeof dec?.role === 'string' && dec.role.trim() ? dec.role.trim() : 'orchestrator'
-      return role === decisionRoleFilter
-    })
+    return decisions.filter((dec) => decisionRoleOf(dec) === decisionRoleFilter)
   }, [decisions, decisionRoleFilter])
 
   const decisionBatch = useInfiniteScrollBatch(
@@ -714,25 +795,13 @@ export function ProductionTrackerPage() {
         )}
 
         <div className="mt-3 divide-y divide-black/[0.05]">
-          {visibleDecisions.map((dec, idx) => {
-            const role = typeof dec?.role === 'string' ? dec.role : 'orchestrator'
-            const kind = typeof dec?.kind === 'string' ? dec.kind : 'decision'
-            const summary = typeof dec?.summary === 'string' ? dec.summary : JSON.stringify(dec)
-            return (
-              <div key={idx} className="flex flex-col gap-1 py-2.5 text-[12.5px] sm:flex-row sm:items-baseline sm:gap-4">
-                <span className="num w-36 shrink-0 text-[11px] text-apple-subtext">
-                  {formatTime(typeof dec?.at === 'string' ? dec.at : null)}
-                </span>
-                <span className="w-36 shrink-0 font-mono text-[11.5px] font-semibold text-apple-blueInk">
-                  {role}
-                </span>
-                <span className="min-w-0 flex-1 break-words text-apple-text">{summary}</span>
-                <span className="shrink-0 font-mono text-[11px] text-apple-subtext">{kind}</span>
-              </div>
-            )
-          })}
+          {visibleDecisions.map((dec, idx) => (
+            <DecisionCard key={idx} raw={dec} />
+          ))}
           {filteredDecisions.length === 0 && (
-            <div className="py-4 text-[12px] text-apple-subtext">当前筛选条件下暂无决策记录。</div>
+            <div className="py-4 text-[12px] text-apple-subtext">
+              {decisions.length === 0 ? '未记录决策' : '当前筛选条件下暂无决策记录。'}
+            </div>
           )}
         </div>
 
