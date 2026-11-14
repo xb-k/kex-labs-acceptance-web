@@ -10,6 +10,7 @@ import { Field, primaryButton, quietButton } from '../components/studio-ui'
 import { StudioProbePanel, type ProbeState } from '../components/studio/StudioProbePanel'
 import { StudioQueueDrawer } from '../components/studio/StudioQueueDrawer'
 import { StudioUploadZone, type UploadSession } from '../components/studio/StudioUploadZone'
+import { PoseLibraryPanel } from '../components/studio/PoseLibraryPanel'
 import { VideoOptimizeWorkbench } from '../components/studio/VideoOptimizeWorkbench'
 import { AsyncStatusLine, ToastHost } from '../components/ui'
 import { formatClockMs, formatSizeBytes } from '../format'
@@ -882,6 +883,9 @@ export function StudioPage() {
             </form>
 
             <ImageWorkbench jobOptions={jobsData} onUseKeyframe={setKeyframeAsset} />
+
+            {/* #138 姿态参考库：A 轨参考素材，放在图片工作台下方，不打断现有分段。 */}
+            <PoseLibraryPanel onNotify={(msg, tone) => showToast(msg, tone ?? 'ok')} />
           </div>
         </div>
       )}
