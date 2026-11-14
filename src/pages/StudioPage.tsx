@@ -11,7 +11,6 @@ import { StudioProbePanel, type ProbeState } from '../components/studio/StudioPr
 import { StudioQueueDrawer } from '../components/studio/StudioQueueDrawer'
 import { StudioUploadZone, type UploadSession } from '../components/studio/StudioUploadZone'
 import { PoseLibraryPanel } from '../components/studio/PoseLibraryPanel'
-import { VideoOptimizeWorkbench } from '../components/studio/VideoOptimizeWorkbench'
 import { AsyncStatusLine, ToastHost } from '../components/ui'
 import { formatClockMs, formatSizeBytes } from '../format'
 import { useToast } from '../hooks'
@@ -609,7 +608,7 @@ export function StudioPage() {
             双轨创作工坊
           </h1>
           <p className="mt-1.5 max-w-[70ch] text-sm leading-relaxed text-apple-subtext">
-            A 轨支持 AI 剧本编写与关键帧生图制片；B 轨支持上传实拍视频、AI 镜头拆画面与 FFmpeg 商业调色美化直出成片。
+            A 轨支持 AI 剧本编写与关键帧生图制片；B 轨上传实拍视频，探针后按计划插帧/超分/降噪增强直出。
           </p>
         </div>
 
@@ -645,7 +644,7 @@ export function StudioPage() {
               }`}
             >
               <Clapper className="h-3.5 w-3.5 text-[#1E7A3C]" />
-              B 轨 · 视频 AI 拆画美化
+              B 轨 · 实拍增强直出
             </button>
           </div>
 
@@ -666,8 +665,102 @@ export function StudioPage() {
         </div>
       </header>
 
-      {/* RAIL B: Deliverable Video Upload -> AI Frame Split -> Beautify & Compare */}
-      {rail === 'b' && <VideoOptimizeWorkbench onNotify={(msg, tone) => showToast(msg, tone ?? 'ok')} />}
+      {/* RAIL B: 实拍增强直出 —— 上传 → 探针 → 确认，统一走 POST /api/studio/jobs */}
+      {rail === 'b' && (
+        <section className="card p-5" aria-labelledby="studio-b-title" data-testid="studio-b-rail">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <h2 id="studio-b-title" className="text-section">
+                B 轨 · 实拍增强直出
+              </h2>
+              <p className="mt-1 text-[11px] leading-relaxed text-apple-subtext">
+                上传实拍 → 探针 → 确认执行；后端 runner s1-f5。
+              </p>
+            </div>
+            <span className="num text-[11px] text-apple-subtext">
+              {jobs.updatedAt ? `同步 ${formatClockMs(jobs.updatedAt)}` : '就绪'}
+            </span>
+          </div>
+
+          <div className="mt-4 space-y-3.5">
+            <div data-testid="studio-b-upload">
+              <StudioUploadZone
+                file={file}
+                session={session}
+                dragging={dragging}
+                uploadSpeedBps={uploadSpeedBps}
+                path={path}
+                sourceRef={sourceRef}
+                fileInputRef={fileInputRef}
+                dropzoneRef={dropzoneRef}
+                onDraggingChange={setDragging}
+                onPickFile={pickFile}
+                onPathChange={setPath}
+                onCancelUpload={cancelUpload}
+                onResumeUpload={() => void resumeUpload()}
+                onRejectDrop={setBError}
+              />
+            </div>
+
+            {session?.status === 'uploading' && (
+              <p
+                role="status"
+                className="rounded-[10px] bg-[#EAF2FD] px-3 py-2 text-[11px] leading-relaxed text-apple-blueInk ring-1 ring-inset ring-[#CFE2FA]"
+              >
+                素材上传中：进度到 100% 后会自动探针，探针完成才能提交 B 轨。
+              </p>
+            )}
+
+            {session?.status === 'failed' && (
+              <p
+                role="alert"
+                className="rounded-[10px] bg-[#FCEDEB] px-3 py-2 text-[11px] leading-relaxed text-[#B3261E] ring-1 ring-inset ring-[#F3D3CF]"
+              >
+                素材上传失败：{session.error ?? '网络中断'}。请点「继续上传」补齐分块，或更换文件重传。
+              </p>
+            )}
+
+            {path.trim() && (
+              <div
+                role="alert"
+                data-testid="studio-b-path-blocked"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-[10px] bg-[#FBF1E4] px-3 py-2 text-[11px] leading-relaxed text-[#8A4B00] ring-1 ring-inset ring-[#F0D9BC]"
+              >
+                <span className="min-w-0 break-words">
+                  B 轨仅接受上传文件：当前填写了 studio 绝对路径，已禁用提交。请清除路径后重试。
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPath('')}
+                  className="shrink-0 font-medium underline underline-offset-2"
+                >
+                  清除路径
+                </button>
+              </div>
+            )}
+
+            {!readyUpload && !path.trim() && session?.status !== 'uploading' && session?.status !== 'failed' && (
+              <p
+                className="rounded-[10px] bg-apple-bg/60 px-3 py-2 text-[11px] leading-relaxed text-apple-subtext ring-1 ring-inset ring-black/[0.06]"
+                role="status"
+              >
+                还没有素材：请先拖拽或选择一个实拍视频，上传完成后自动探针。
+              </p>
+            )}
+
+            {readyUpload && !path.trim() && (
+              <StudioProbePanel
+                probe={probe}
+                blocked={submitBlocked}
+                submitting={submitting}
+                error={bError}
+                onRetry={() => void runProbe(readyUpload.uploadId)}
+                onSubmit={() => void handleBSubmit()}
+              />
+            )}
+          </div>
+        </section>
+      )}
 
       {/* RAIL A: AI Script -> Brief Gate -> Keyframe Image -> I2V Job */}
       {rail === 'a' && (
@@ -691,7 +784,7 @@ export function StudioPage() {
                     A 轨制片入队
                   </h2>
                   <p className="mt-1 text-[11px] leading-relaxed text-apple-subtext">
-                    关联已确认 Brief 与可选首帧生图，创建 A 轨渲染任务；或直接上传参考素材探测转入 B 轨精修。
+                    关联已确认 Brief 与可选首帧生图，创建 A 轨渲染任务；实拍增强请切到 B 轨。
                   </p>
                 </div>
                 <span className="num text-[11px] text-apple-subtext">
@@ -755,17 +848,6 @@ export function StudioPage() {
                   ) : (
                     <p className="mt-2 text-[11px] leading-relaxed text-apple-subtext">Brief 读取中…</p>
                   ))}
-
-                {readyUpload && !path.trim() && (
-                  <StudioProbePanel
-                    probe={probe}
-                    blocked={submitBlocked}
-                    submitting={submitting}
-                    error={bError}
-                    onRetry={() => void runProbe(readyUpload.uploadId)}
-                    onSubmit={() => void handleBSubmit()}
-                  />
-                )}
 
                 {keyframeAsset && (
                   <div
