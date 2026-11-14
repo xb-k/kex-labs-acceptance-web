@@ -22,7 +22,9 @@ import {
   formatPoseDate,
   formatPoseSyncStatus,
   getPoseSyncStatus,
+  materializePoseEntry,
   poseShotLabel,
+  poseUsageFromMaterialize,
   removePoseEntry,
   runPoseSync,
   validatePoseDraft,
@@ -32,9 +34,10 @@ import {
   type PoseLibraryItem,
   type PoseLibraryList,
   type PoseShot,
-  type PoseSyncResult
+  type PoseSyncResult,
+  type PoseUsage
 } from '../../pose-library'
-import { Close, Copy, ExternalLink, Film, Plus, Refresh, Trash } from '../icons'
+import { Close, Copy, ExternalLink, Film, Plus, Refresh, Sparkles, Trash } from '../icons'
 import { SelectMenu, type SelectMenuOption } from '../SelectMenu'
 import { Field, inputClass, primaryButton, quietButton } from '../studio-ui'
 import { AsyncStatusLine } from '../ui'
@@ -84,13 +87,17 @@ function Chip({ active, children, ...rest }: { active?: boolean; children: React
 export function PoseLibraryCard({
   item,
   deleting,
+  using,
   onDelete,
-  onCopy
+  onCopy,
+  onUse
 }: {
   item: PoseLibraryItem
   deleting?: boolean
+  using?: boolean
   onDelete?: (item: PoseLibraryItem) => void
   onCopy?: (item: PoseLibraryItem) => void
+  onUse?: (item: PoseLibraryItem) => void
 }) {
   const verified = item.license_verified
   // 预览地址失效时退回「无预览图」占位，避免卡片顶部出现破图。
@@ -181,6 +188,18 @@ export function PoseLibraryCard({
             </span>
             <button
               type="button"
+              onClick={() => onUse?.(item)}
+              disabled={using || !item.preview_url}
+              title={item.preview_url ? `用「${item.label_zh}」作参考图` : '无预览图'}
+              aria-label={`用作参考图 ${item.label_zh}`}
+              data-testid="pose-use"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-black/[0.1] px-2 text-[11px] font-medium text-apple-blueInk transition-colors hover:bg-[#EAF2FD] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              {using ? '准备中…' : '用作参考图'}
+            </button>
+            <button
+              type="button"
               onClick={() => onCopy?.(item)}
               aria-label={`复制引用 ID ${item.id}`}
               title={item.id}
@@ -211,13 +230,17 @@ export function PoseLibraryCard({
 export function PoseLibraryGrid({
   items,
   deletingId,
+  usingId,
   onDelete,
-  onCopy
+  onCopy,
+  onUse
 }: {
   items: PoseLibraryItem[]
   deletingId?: string | null
+  usingId?: string | null
   onDelete?: (item: PoseLibraryItem) => void
   onCopy?: (item: PoseLibraryItem) => void
+  onUse?: (item: PoseLibraryItem) => void
 }) {
   return (
     <div
@@ -229,8 +252,10 @@ export function PoseLibraryGrid({
           key={item.id}
           item={item}
           deleting={deletingId === item.id}
+          using={usingId === item.id}
           onDelete={onDelete}
           onCopy={onCopy}
+          onUse={onUse}
         />
       ))}
     </div>
@@ -682,12 +707,19 @@ export function PoseSyncBar({
 // 面板
 // ---------------------------------------------------------------------------
 
-export function PoseLibraryPanel({ onNotify }: { onNotify?: Notify }) {
+export function PoseLibraryPanel({
+  onNotify,
+  onUsePose
+}: {
+  onNotify?: Notify
+  onUsePose?: (pose: PoseUsage) => void
+}) {
   const [search, setSearch] = useState('')
   const [filters, setFilters] = useState<PoseFilters>(EMPTY_POSE_FILTERS)
   const [addOpen, setAddOpen] = useState(false)
   const [confirmEntry, setConfirmEntry] = useState<PoseLibraryItem | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [usingId, setUsingId] = useState<string | null>(null)
   const [loadingSince, setLoadingSince] = useState<number | null>(null)
   const [syncStatus, setSyncStatus] = useState<PoseSyncResult | null>(null)
   const [syncBusy, setSyncBusy] = useState(false)
@@ -736,6 +768,24 @@ export function PoseLibraryPanel({ onNotify }: { onNotify?: Notify }) {
     setDeletingId(item.id)
     setConfirmEntry(item)
   }, [])
+
+  /** #138 用作参考图：把预览图 materialize 成 studio upload，交给 ImageWorkbench。 */
+  const usePose = useCallback(
+    async (item: PoseLibraryItem) => {
+      if (!item.preview_url || usingId) return
+      setUsingId(item.id)
+      try {
+        const result = await materializePoseEntry(item.id)
+        onUsePose?.(poseUsageFromMaterialize(item, result))
+        onNotify?.(`已把「${item.label_zh}」设为参考图`)
+      } catch (err) {
+        onNotify?.(`用作参考图失败：${formatPoseError(err)}`, 'err')
+      } finally {
+        setUsingId(null)
+      }
+    },
+    [onNotify, onUsePose, usingId]
+  )
 
   // 上次同步状态：失败不阻塞列表展示。
   useEffect(() => {
@@ -876,8 +926,10 @@ export function PoseLibraryPanel({ onNotify }: { onNotify?: Notify }) {
           <PoseLibraryGrid
             items={items}
             deletingId={deletingId}
+            usingId={usingId}
             onDelete={openDelete}
             onCopy={(item) => void copyId(item)}
+            onUse={(item) => void usePose(item)}
           />
         )}
       </div>

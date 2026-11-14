@@ -16,6 +16,7 @@ import { AsyncStatusLine, ToastHost } from '../components/ui'
 import { formatClockMs, formatSizeBytes } from '../format'
 import { useToast } from '../hooks'
 import { KEYFRAME_ONLY_HINT, buildAigcJobPayload, hasAigcSource } from '../image-workbench'
+import type { PoseUsage } from '../pose-library'
 import { buildOptimizeJobPayload, type UploadProbeResponse } from '../studio-probe'
 import type {
   StudioBrief,
@@ -148,6 +149,7 @@ export function StudioPage() {
   const [createdStartedAt, setCreatedStartedAt] = useState<number | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [keyframeAsset, setKeyframeAsset] = useState<StudioKeyframeRef | null>(null)
+  const [poseUpload, setPoseUpload] = useState<PoseUsage | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [createdJobId, setCreatedJobId] = useState<string | null>(null)
   const [focusJobId, setFocusJobId] = useState<string | null>(() => readJobParam())
@@ -882,10 +884,18 @@ export function StudioPage() {
               </div>
             </form>
 
-            <ImageWorkbench jobOptions={jobsData} onUseKeyframe={setKeyframeAsset} />
+            <ImageWorkbench
+              jobOptions={jobsData}
+              onUseKeyframe={setKeyframeAsset}
+              poseUpload={poseUpload}
+              onClearPose={() => setPoseUpload(null)}
+            />
 
             {/* #138 姿态参考库：A 轨参考素材，放在图片工作台下方，不打断现有分段。 */}
-            <PoseLibraryPanel onNotify={(msg, tone) => showToast(msg, tone ?? 'ok')} />
+            <PoseLibraryPanel
+              onNotify={(msg, tone) => showToast(msg, tone ?? 'ok')}
+              onUsePose={setPoseUpload}
+            />
           </div>
         </div>
       )}

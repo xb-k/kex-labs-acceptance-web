@@ -9,6 +9,7 @@ import type {
   StudioJobStatus,
   StudioKeyframeRef
 } from './types'
+import type { PoseUsage } from './pose-library'
 
 export type ImageSize = { value: string; width: number; height: number; label: string; hint: string }
 
@@ -321,6 +322,20 @@ export function referencePanelState(input: {
     canClear: hasUpload && !input.uploading,
     note
   }
+}
+
+/**
+ * #138 移除姿态参考：仅当当前参考图仍是姿态库带入的那张时清空；
+ * 用户已改用别的上传则保持不动，避免误删用户自己的参考图。
+ */
+export function clearPoseReferenceState(
+  current: { uploadId: string | null; sourceName: string | null },
+  pose: PoseUsage | null | undefined
+): { uploadId: string | null; sourceName: string | null } {
+  if (pose && current.uploadId === pose.uploadId) {
+    return { uploadId: null, sourceName: null }
+  }
+  return current
 }
 
 const STATUS_LABEL: Record<StudioJobStatus, string> = {

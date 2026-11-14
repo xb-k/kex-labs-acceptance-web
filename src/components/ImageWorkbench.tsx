@@ -26,6 +26,7 @@ import {
   buildPromptEnhanceRequest,
   canCancelImageJob,
   canDeleteJob,
+  clearPoseReferenceState,
   formatJobDuration,
   galleryMeta,
   IMAGE_WAIT_STAGES,
@@ -43,6 +44,7 @@ import {
   validateImageForm
 } from '../image-workbench'
 import type { PromptEnhanceResponse } from '../image-workbench'
+import type { PoseUsage } from '../pose-library'
 import { uploadFileInChunks } from '../upload-client'
 
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp']
@@ -345,21 +347,30 @@ function GalleryCard({
 
 export function ImageWorkbench({
   jobOptions,
-  onUseKeyframe
+  onUseKeyframe,
+  poseUpload = null,
+  onClearPose
 }: {
   jobOptions: StudioJobSummary[]
   onUseKeyframe: (ref: StudioKeyframeRef) => void
+  /** #138 从姿态库带入的参考图（materialize 后的 upload）。 */
+  poseUpload?: PoseUsage | null
+  onClearPose?: () => void
 }) {
-  const [mode, setMode] = useState<StudioImageMode>('t2i')
+  const [mode, setMode] = useState<StudioImageMode>(() => (poseUpload ? 'edit' : 't2i'))
   const [prompt, setPrompt] = useState('')
   const [negative, setNegative] = useState('')
   const [enhance, dispatchEnhance] = useReducer(promptEnhanceReducer, initialPromptEnhanceState)
   const [size, setSize] = useState(DEFAULT_IMAGE_SIZE)
   const [seed, setSeed] = useState(DEFAULT_SEED)
   const [steps, setSteps] = useState(DEFAULT_STEPS)
-  const [denoise, setDenoise] = useState(T2I_DENOISE)
-  const [sourceUploadId, setSourceUploadId] = useState<string | null>(null)
-  const [sourceName, setSourceName] = useState<string | null>(null)
+  const [denoise, setDenoise] = useState(poseUpload ? DEFAULT_EDIT_DENOISE : T2I_DENOISE)
+  const [sourceUploadId, setSourceUploadId] = useState<string | null>(
+    () => poseUpload?.uploadId ?? null
+  )
+  const [sourceName, setSourceName] = useState<string | null>(
+    () => poseUpload?.filename ?? null
+  )
   const [sourceImage, setSourceImage] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -419,6 +430,17 @@ export function ImageWorkbench({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [pendingDelete, deletingId])
+
+  // #138 姿态库选中的参考图：自动切到 Edit 并注入 upload_id / 文件名；提交后不清，允许复用。
+  useEffect(() => {
+    if (!poseUpload) return
+    setMode('edit')
+    setDenoise(DEFAULT_EDIT_DENOISE)
+    setSourceUploadId(poseUpload.uploadId)
+    setSourceName(poseUpload.filename)
+    setUploadError(null)
+    setUploadProgress(0)
+  }, [poseUpload])
 
   function switchMode(next: StudioImageMode) {
     setMode(next)
@@ -488,6 +510,17 @@ export function ImageWorkbench({
     setUploadProgress(0)
     setUploadError(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  /** #138 移除姿态参考：只清参考图，不改 prompt；若之后换了别的参考图则不动它。 */
+  function clearPoseReference() {
+    const next = clearPoseReferenceState({ uploadId: sourceUploadId, sourceName }, poseUpload)
+    setSourceUploadId(next.uploadId)
+    setSourceName(next.sourceName)
+    setUploadProgress(0)
+    setUploadError(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    onClearPose?.()
   }
 
   /** 上传完成后的一键切换：显式改到 Edit，并清掉可能冲突的绝对路径。 */
@@ -660,6 +693,27 @@ export function ImageWorkbench({
               ))}
             </div>
           </fieldset>
+
+          {poseUpload && (
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 rounded-[10px] bg-[#F0F6FF] px-2.5 py-2 text-apple-blueInk ring-1 ring-inset ring-[#CFE2FA]"
+              data-testid="image-pose-chip"
+              data-pose-upload-id={poseUpload.uploadId}
+            >
+              <p className="min-w-0 break-words text-[11px] leading-relaxed">
+                姿态参考：{poseUpload.label} · upload_id{' '}
+                <span className="num">{poseUpload.uploadId}</span>
+              </p>
+              <button
+                type="button"
+                onClick={clearPoseReference}
+                className={`${quietButton} h-7 shrink-0 px-2.5 text-[11px]`}
+                data-testid="image-pose-clear"
+              >
+                移除
+              </button>
+            </div>
+          )}
 
           <section
             className="rounded-[12px] border border-black/[0.08] bg-apple-bg/40 p-3"

@@ -12,6 +12,7 @@ import {
   buildJobDeletePlan,
   canCancelImageJob,
   canDeleteJob,
+  clearPoseReferenceState,
   formatJobDuration,
   galleryMeta,
   IMAGE_WAIT_STAGES,
@@ -401,6 +402,35 @@ test('#112 清除参考图 / 上传中：状态归零且不可清除', () => {
   assert.equal(busy.canUpload, false)
   assert.equal(busy.canClear, false)
   assert.equal(busy.showReady, true)
+})
+
+test('#138 姿态参考 SSR：带入后自动选 Edit，显示 chip 与移除按钮', () => {
+  const html = renderToStaticMarkup(
+    createElement(ImageWorkbench, {
+      jobOptions: [],
+      onUseKeyframe: () => undefined,
+      poseUpload: { uploadId: 'up-pose', filename: 'pose.png', label: '单人侧身站立' }
+    })
+  )
+  assert.match(html, /aria-pressed="true"[^>]*>参考图改写 Edit/)
+  assert.match(html, /data-testid="image-pose-chip"[^>]*data-pose-upload-id="up-pose"/)
+  assert.match(html, /姿态参考：单人侧身站立/)
+  assert.match(html, /data-testid="image-pose-clear"[^>]*>移除/)
+})
+
+test('#138 移除姿态参考：仍指向姿态图时清空，换成别的参考图则保留', () => {
+  const pose = { uploadId: 'up-pose', filename: 'pose.png', label: '单人侧身站立' }
+  assert.deepEqual(clearPoseReferenceState({ uploadId: 'up-pose', sourceName: 'pose.png' }, pose), {
+    uploadId: null,
+    sourceName: null
+  })
+
+  const replaced = { uploadId: 'up-mine', sourceName: 'mine.png' }
+  assert.equal(clearPoseReferenceState(replaced, pose), replaced)
+  assert.deepEqual(clearPoseReferenceState({ uploadId: 'up-pose', sourceName: 'pose.png' }, null), {
+    uploadId: 'up-pose',
+    sourceName: 'pose.png'
+  })
 })
 
 

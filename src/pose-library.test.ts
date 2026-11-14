@@ -17,7 +17,9 @@ import {
   formatPoseSyncStatus,
   getPoseSyncStatus,
   listPoseEntries,
+  materializePoseEntry,
   parsePoseTags,
+  poseUsageFromMaterialize,
   removePoseEntry,
   runPoseSync,
   validatePoseDraft,
@@ -416,6 +418,24 @@ test('#138 卡片预览区固定高度：h-28/sm:h-32、图片 object-cover、�
   assert.match(withoutPreview, /无预览图/)
 })
 
+test('#138 用作参考图按钮：无预览图禁用，有预览图可点', () => {
+  const withoutPreview = html(
+    createElement(PoseLibraryGrid, { items: [{ ...ITEM, preview_url: null }], onUse: () => {} })
+  )
+  assert.match(withoutPreview, /disabled=""[^>]*data-testid="pose-use"/)
+  assert.match(withoutPreview, /title="无预览图"/)
+
+  const withPreview = html(
+    createElement(PoseLibraryGrid, {
+      items: [{ ...ITEM, preview_url: 'https://cdn.example.com/previews/pose.jpg' }],
+      onUse: () => {}
+    })
+  )
+  assert.match(withPreview, /data-testid="pose-use"/)
+  assert.doesNotMatch(withPreview, /disabled=""[^>]*data-testid="pose-use"|data-testid="pose-use"[^>]*disabled=""/)
+  assert.match(withPreview, /aria-label="用作参考图 单人侧身站立"/)
+})
+
 // ---------------------------------------------------------------------------
 // #138 增强：从 GitHub 同步（状态行 / 按钮 / API 契约）
 // ---------------------------------------------------------------------------
@@ -500,6 +520,51 @@ test('#138 同步 API：GET sync-status / POST 同步（force 透传）', async 
       }
     )
     assert.equal(authCalls.length, 1)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('#138 materialize 成功：POST 端点并映射为参考图三件套', async () => {
+  const original = globalThis.fetch
+  const result = {
+    upload_id: 'up_pose_00000000',
+    filename: 'pose-standing.png',
+    size: 2048,
+    sha256: 'a'.repeat(64),
+    studio_path: '/kex-repo/uploads/pose-standing.png'
+  }
+  const calls = stubFetch(() => jsonResponse(result))
+  try {
+    const materialized = await materializePoseEntry(ITEM.id)
+    assert.equal(calls[0].url, `/api/pose-library/${ITEM.id}/materialize`)
+    assert.equal(calls[0].method, 'POST')
+    assert.deepEqual(poseUsageFromMaterialize(ITEM, materialized), {
+      uploadId: result.upload_id,
+      filename: result.filename,
+      label: ITEM.label_zh
+    })
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('#138 materialize 失败：错误码透出中文提示', async () => {
+  const original = globalThis.fetch
+  stubFetch(() => jsonResponse({ error: 'preview_missing' }, 409))
+  try {
+    await assert.rejects(
+      () => materializePoseEntry(ITEM.id),
+      (err: unknown) => {
+        assert.ok(err instanceof HttpError)
+        assert.equal(err.status, 409)
+        assert.equal(
+          formatPoseError(err),
+          '409 preview_missing（该条目没有预览图，不能用作参考图）'
+        )
+        return true
+      }
+    )
   } finally {
     globalThis.fetch = original
   }

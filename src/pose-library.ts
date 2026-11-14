@@ -224,6 +224,14 @@ export function validatePoseDraft(draft: PoseDraft): PoseDraftResult {
 
 const POSE_ERROR_HINTS: Record<string, string> = {
   license_unverified: 'license 与授权证据链接必须齐全',
+  preview_missing: '该条目没有预览图，不能用作参考图',
+  preview_unavailable: '预览图不可用（本地缺失、非图片或超过 8 MiB），请更换预览地址后重试',
+  studio_stage_failed: 'studio 暂存失败，本地副本已保留，可稍后重试',
+  upload_unconfigured: '服务端未配置上传路径，暂不能用作参考图',
+  unsupported_type: '仅支持 png / jpg / jpeg / webp',
+  empty_bytes: '预览图为空，无法用作参考图',
+  invalid_filename: '参考图文件名不合法',
+  write_failed: '写入本地副本失败，请重试',
   duplicate_source_url: '该来源已在库中，换个来源或先删除旧条目',
   label_zh_invalid: '中文标签不合法',
   source_url_invalid: '来源链接不合法',
@@ -264,6 +272,40 @@ export function createPoseEntry(payload: PosePayload): Promise<PoseLibraryItem> 
 
 export function removePoseEntry(id: string): Promise<void> {
   return deleteJson<{ ok: boolean }>(`/api/pose-library/${encodeURIComponent(id)}`).then(() => undefined)
+}
+
+/** #138 `POST /api/pose-library/:id/materialize` 响应（与 server/pose-library.ts 对齐）。 */
+export type PoseMaterializeResult = {
+  upload_id: string
+  filename: string
+  size: number
+  sha256: string
+  studio_path: string
+}
+
+/** 姿态参考 → 图片工作台的三件套（upload_id / 文件名 / 中文标签）。 */
+export type PoseUsage = {
+  uploadId: string
+  filename: string
+  label: string
+}
+
+export function poseUsageFromMaterialize(
+  item: PoseLibraryItem,
+  result: PoseMaterializeResult
+): PoseUsage {
+  return { uploadId: result.upload_id, filename: result.filename, label: item.label_zh }
+}
+
+/**
+ * #138 把姿态预览图落成 studio upload；成功后返回值可直接作为
+ * ImageWorkbench 的 source_upload_id。失败抛 HttpError（error 为预览/暂存错误码）。
+ */
+export function materializePoseEntry(id: string): Promise<PoseMaterializeResult> {
+  return postJson<PoseMaterializeResult>(
+    `/api/pose-library/${encodeURIComponent(id)}/materialize`,
+    {}
+  )
 }
 
 export function poseShotLabel(shot: string): string {
