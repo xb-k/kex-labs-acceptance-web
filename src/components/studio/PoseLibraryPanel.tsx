@@ -102,7 +102,10 @@ export function PoseLibraryCard({
       data-testid="pose-card"
       data-pose-id={item.id}
     >
-      <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F2F2F5]">
+      <div
+        className="relative h-28 w-full overflow-hidden bg-[#F2F2F5] sm:h-32"
+        data-testid="pose-preview"
+      >
         {showPreview ? (
           <img
             src={item.preview_url ?? undefined}
@@ -129,9 +132,9 @@ export function PoseLibraryCard({
         </span>
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col gap-2 p-3.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-2 p-3">
         <div className="flex min-w-0 items-start justify-between gap-2">
-          <h3 className="min-w-0 break-words text-[14px] font-semibold leading-snug text-apple-text">
+          <h3 className="min-w-0 break-words text-[13px] font-semibold leading-snug text-apple-text">
             {item.label_zh}
           </h3>
           <span className="num max-w-[50%] shrink-0 truncate rounded-full bg-black/[0.04] px-2 py-0.5 text-[10.5px] text-apple-subtext">
@@ -218,7 +221,7 @@ export function PoseLibraryGrid({
 }) {
   return (
     <div
-      className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3"
+      className="grid min-w-0 grid-cols-2 gap-2.5 lg:grid-cols-3 2xl:grid-cols-4"
       data-testid="pose-grid"
     >
       {items.map((item) => (

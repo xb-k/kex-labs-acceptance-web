@@ -391,10 +391,29 @@ test('#138 卡片窄栏不溢出：min-w-0/overflow-hidden/break-all/break-words
   assert.match(markup, /loading="lazy"/)
 })
 
-test('#138 grid 断点：父容器窄时单列，lg 两列，2xl 三列', () => {
+test('#138 grid 断点：默认两列、lg 三列、2xl 四列、紧凑间距', () => {
   const markup = html(createElement(PoseLibraryGrid, { items: [ITEM] }))
-  assert.match(markup, /class="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3" data-testid="pose-grid"/)
+  assert.match(markup, /class="grid min-w-0 grid-cols-2 gap-2.5 lg:grid-cols-3 2xl:grid-cols-4" data-testid="pose-grid"/)
   assert.doesNotMatch(markup, /(^|[\s"])sm:grid-cols-2|(^|[\s"])xl:grid-cols-3/)
+})
+
+test('#138 卡片预览区固定高度：h-28/sm:h-32、图片 object-cover、占位同高', () => {
+  const withPreview = html(
+    createElement(PoseLibraryGrid, {
+      items: [{ ...ITEM, preview_url: 'https://cdn.example.com/previews/pose.jpg' }]
+    })
+  )
+  assert.match(
+    withPreview,
+    /<div class="relative h-28 w-full overflow-hidden bg-\[#F2F2F5\] sm:h-32" data-testid="pose-preview"/
+  )
+  assert.doesNotMatch(withPreview, /aspect-\[4\/3\]/)
+  assert.match(withPreview, /class="h-full w-full object-cover"/)
+
+  const withoutPreview = html(createElement(PoseLibraryGrid, { items: [{ ...ITEM, preview_url: null }] }))
+  assert.match(withoutPreview, /data-testid="pose-preview"/)
+  assert.match(withoutPreview, /<div class="flex h-full w-full flex-col items-center justify-center[^"]*">/)
+  assert.match(withoutPreview, /无预览图/)
 })
 
 // ---------------------------------------------------------------------------
