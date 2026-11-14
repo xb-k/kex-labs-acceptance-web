@@ -55,6 +55,9 @@ test('必填与格式校验：缺字段、非中文、超长、非 https、未�
     { name: '非中文 label', body: { ...BASE, label_zh: 'standing pose' }, error: 'label_zh_invalid' },
     { name: 'label 超 60 字', body: { ...BASE, label_zh: '正'.repeat(61) }, error: 'label_zh_invalid' },
     { name: 'source 非 https', body: { ...BASE, source_url: 'http://example.com/a' }, error: 'source_url_invalid' },
+    { name: 'content_sha 非 hex', body: { ...BASE, content_sha: 'zz'.repeat(20) }, error: 'content_sha_invalid' },
+    { name: 'content_sha 长度不对', body: { ...BASE, content_sha: 'a'.repeat(39) }, error: 'content_sha_invalid' },
+    { name: 'content_sha 非字符串', body: { ...BASE, content_sha: 123 }, error: 'content_sha_invalid' },
     { name: '缺 license', body: { ...BASE, license: undefined }, error: 'license_unverified' },
     { name: '未知 license', body: { ...BASE, license: 'GPL-3.0' }, error: 'license_unverified' },
     { name: '缺 evidence', body: { ...BASE, license_evidence_url: undefined }, error: 'license_unverified' },
@@ -85,7 +88,17 @@ test('合法输入：默认值、中文标签、枚举去重、可选 preview', 
     assert.deepEqual(minimal.value.suitable_shots, [])
     assert.deepEqual(minimal.value.tags, [])
     assert.equal(minimal.value.note, '')
+    assert.equal(minimal.value.content_sha, null)
   }
+
+  const sha40 = 'A'.repeat(40)
+  const withSha = validatePoseInput({ ...BASE, content_sha: sha40 })
+  assert.equal(withSha.ok, true)
+  if (withSha.ok) assert.equal(withSha.value.content_sha, sha40.toLowerCase())
+  const sha64 = validatePoseInput({ ...BASE, source_url: 'https://example.com/poses/sha64', content_sha: 'b'.repeat(64) })
+  assert.equal(sha64.ok, true)
+  if (sha64.ok) assert.equal(sha64.value.content_sha, 'b'.repeat(64))
+  assert.equal(validatePoseInput({ ...BASE, content_sha: '' }).ok, true)
 
   const full = validatePoseInput({
     ...BASE,
@@ -169,6 +182,40 @@ test('addPoseEntry 去重并返回 409 语义；文件保持原样', async () =>
   assert.equal(readPoseEntries(root, readJson).length, 1)
 })
 
+test('#169 内容去重：同 content_sha 不同 source_url 返回 409 duplicate_content', async () => {
+  const root = freshRoot()
+  const opts = {
+    dataRoot: root,
+    readJson,
+    atomicWriteJson: writeJsonAtomic,
+    now: () => new Date('2026-11-14T00:00:00.000Z')
+  }
+  const sha = 'c'.repeat(40)
+  const base = {
+    label_zh: '正面站姿',
+    preview_url: null,
+    license: 'CC0' as const,
+    license_evidence_url: 'https://example.com/license',
+    suitable_shots: [] as [],
+    tags: [] as string[],
+    note: ''
+  }
+  const first = await addPoseEntry({
+    ...opts,
+    value: { ...base, source_url: 'https://example.com/poses/sha-a', content_sha: sha }
+  })
+  assert.equal(first.ok, true)
+
+  // 相同内容、不同来源（例如 fork / 镜像）→ duplicate_content，先于 source_url 判定。
+  const dup = await addPoseEntry({
+    ...opts,
+    value: { ...base, source_url: 'https://mirror.example.com/poses/sha-b', content_sha: sha.toUpperCase() }
+  })
+  assert.equal(dup.ok, false)
+  if (!dup.ok) assert.equal(dup.error, 'duplicate_content')
+  assert.equal(readPoseEntries(root, readJson).length, 1)
+})
+
 test('filterPoseEntries：q / license / shot 组合过滤，非法过滤值 400', () => {
   const entries: PoseEntry[] = [
     {
@@ -217,6 +264,63 @@ test('filterPoseEntries：q / license / shot 组合过滤，非法过滤值 400'
   const badShot = filterPoseEntries(entries, { q: '', license: '', shot: 'portrait', limit: 20, offset: 0 })
   assert.equal(badShot.ok, false)
   if (!badShot.ok) assert.equal(badShot.error, 'shot_invalid')
+})
+
+function poseRow(partial: Partial<PoseEntry> & { id: string; created_at: string }): PoseEntry {
+  return {
+    label_zh: '正面站姿',
+    preview_url: null,
+    source_url: `https://example.com/poses/${partial.id}`,
+    license: 'CC0',
+    license_evidence_url: 'https://example.com/license',
+    license_verified: true,
+    suitable_shots: [],
+    tags: [],
+    note: '',
+    content_sha: null,
+    ...partial
+  }
+}
+
+test('#169 查询去重：同 sha / 同 preview / 同来源只出 1 条，同刻按 id 稳定且分页不漏', () => {
+  const sha = 'd'.repeat(40)
+  const entries: PoseEntry[] = [
+    // 同 sha：排序后第一条是 id 更大的 pose_b（created_at 相同）。
+    poseRow({ id: 'pose_a', created_at: '2026-11-14T02:00:00.000Z', content_sha: sha }),
+    poseRow({ id: 'pose_b', created_at: '2026-11-14T02:00:00.000Z', content_sha: sha }),
+    // 无 sha，同 preview_url。
+    poseRow({
+      id: 'pose_c',
+      created_at: '2026-11-14T01:00:00.000Z',
+      preview_url: 'https://cdn.example.com/same.png'
+    }),
+    poseRow({
+      id: 'pose_d',
+      created_at: '2026-11-14T00:30:00.000Z',
+      preview_url: 'https://cdn.example.com/same.png'
+    }),
+    // 无 sha 无 preview，同归一化 source_url（大小写 / 尾斜杠 / hash）。
+    poseRow({ id: 'pose_e', created_at: '2026-11-14T00:00:00.000Z', source_url: 'https://example.com/poses/same' }),
+    poseRow({
+      id: 'pose_f',
+      created_at: '2026-11-13T00:00:00.000Z',
+      source_url: 'https://Example.com/poses/same/#frag'
+    })
+  ]
+
+  const all = filterPoseEntries(entries, { q: '', license: '', shot: '', limit: 20, offset: 0 })
+  assert.equal(all.ok, true)
+  if (!all.ok) return
+  assert.equal(all.total, 3)
+  assert.deepEqual(all.items.map((e) => e.id), ['pose_b', 'pose_c', 'pose_e'])
+
+  const pages: string[][] = []
+  for (let offset = 0; offset < 4; offset += 1) {
+    const page = filterPoseEntries(entries, { q: '', license: '', shot: '', limit: 1, offset })
+    assert.equal(page.ok, true)
+    if (page.ok) pages.push(page.items.map((e) => e.id))
+  }
+  assert.deepEqual(pages, [['pose_b'], ['pose_c'], ['pose_e'], []])
 })
 
 // ---------------------------------------------------------------------------
@@ -388,6 +492,30 @@ test('HTTP 去重：归一化后相同 source_url 409，库内仍一条', async 
   const dup = await post({ ...BASE, label_zh: '另一个标签', source_url: 'https://example.com/poses/A' })
   assert.equal(dup.status, 409)
   assert.equal(dup.body.error, 'duplicate_source_url')
+
+  const rows = JSON.parse(fs.readFileSync(poseLibraryFile(root), 'utf8'))
+  assert.equal(rows.length, 1)
+})
+
+test('#169 HTTP 内容去重：同 content_sha 不同 source_url 409 duplicate_content', async () => {
+  resetLibrary()
+  const sha = 'e'.repeat(40)
+  const first = await post({ ...BASE, source_url: 'https://example.com/poses/content-a', content_sha: sha })
+  assert.equal(first.status, 201)
+  assert.equal(first.body.item.content_sha, sha)
+
+  const dup = await post({
+    ...BASE,
+    label_zh: '另一个标签',
+    source_url: 'https://mirror.example.com/poses/content-b',
+    content_sha: sha
+  })
+  assert.equal(dup.status, 409)
+  assert.equal(dup.body.error, 'duplicate_content')
+
+  const invalid = await post({ ...BASE, source_url: 'https://example.com/poses/bad-sha', content_sha: 'xyz' })
+  assert.equal(invalid.status, 400)
+  assert.equal(invalid.body.error, 'content_sha_invalid')
 
   const rows = JSON.parse(fs.readFileSync(poseLibraryFile(root), 'utf8'))
   assert.equal(rows.length, 1)

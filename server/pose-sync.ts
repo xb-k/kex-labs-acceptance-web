@@ -53,6 +53,7 @@ export type PoseSyncSkipReason =
   | 'license_missing'
   | 'license_not_allowed'
   | 'no_pose_images'
+  | 'duplicate_content'
   | 'duplicate_source_url'
   | 'add_failed'
   | 'max_images_per_run'
@@ -112,7 +113,7 @@ type GithubRepo = {
   default_branch?: unknown
 }
 
-type TreeEntry = { path?: unknown; type?: unknown }
+type TreeEntry = { path?: unknown; type?: unknown; sha?: unknown }
 
 // ---------------------------------------------------------------------------
 // 状态文件
@@ -340,6 +341,7 @@ export async function runPoseSync(opts: {
     suitable_shots: ['full_body']
     tags: string[]
     note: string
+    content_sha: string | null
   }) => Promise<{ ok: true; item: PoseEntry } | { ok: false; status: 409; error: string }>
   fetchImpl?: FetchLike
   env?: NodeJS.ProcessEnv
@@ -389,6 +391,7 @@ async function syncOnce(opts: {
     suitable_shots: ['full_body']
     tags: string[]
     note: string
+    content_sha: string | null
   }) => Promise<{ ok: true; item: PoseEntry } | { ok: false; status: 409; error: string }>
   fetchImpl: FetchLike
   env: NodeJS.ProcessEnv
@@ -451,9 +454,12 @@ async function syncOnce(opts: {
 
   const existing = readStoredEntries(dataRoot, opts.readJson)
   const seenSources = new Set<string>()
+  const seenContents = new Set<string>()
   for (const entry of existing) {
     const source = String(entry.source_url ?? '').trim()
     if (source) seenSources.add(normalizeSourceKey(source))
+    const sha = String(entry.content_sha ?? '').trim().toLowerCase()
+    if (sha) seenContents.add(sha)
   }
   const sourceKey = normalizeSourceKey
 
@@ -503,8 +509,11 @@ async function syncOnce(opts: {
     const tree = Array.isArray(treeRes.data?.tree) ? (treeRes.data.tree as TreeEntry[]) : []
     const candidates = tree
       .filter((entry) => entry.type === 'blob' && typeof entry.path === 'string')
-      .map((entry) => entry.path as string)
-      .filter(isPoseImagePath)
+      .map((entry) => ({
+        path: entry.path as string,
+        sha: typeof entry.sha === 'string' && entry.sha.trim() ? entry.sha.trim().toLowerCase() : null
+      }))
+      .filter((entry) => isPoseImagePath(entry.path))
       .slice(0, MAX_IMAGES_PER_REPO)
 
     if (candidates.length === 0) {
@@ -513,9 +522,14 @@ async function syncOnce(opts: {
     }
 
     const evidence = licenseEvidenceUrl(repo, tree)
-    for (const filePath of candidates) {
+    for (const { path: filePath, sha } of candidates) {
       if (result.imported >= MAX_IMAGES_PER_RUN) {
         countSkip('max_images_per_run', repoRow)
+        continue
+      }
+      // #169：同 blob sha（跨 fork / 镜像）只导入一次。
+      if (sha && seenContents.has(sha)) {
+        countSkip('duplicate_content', repoRow)
         continue
       }
       const sourceUrl = githubBlobUrl(repo, filePath)
@@ -531,15 +545,18 @@ async function syncOnce(opts: {
         license_evidence_url: evidence,
         suitable_shots: ['full_body'] as ['full_body'],
         tags: [repo, 'github'],
-        note: ''
+        note: '',
+        content_sha: sha
       }
       try {
         const added = await opts.addPoseEntry(value)
         if (!added.ok) {
-          countSkip('duplicate_source_url', repoRow)
+          countSkip(added.error === 'duplicate_content' ? 'duplicate_content' : 'duplicate_source_url', repoRow)
+          if (sha) seenContents.add(sha)
           seenSources.add(sourceKey(sourceUrl))
           continue
         }
+        if (sha) seenContents.add(sha)
         seenSources.add(sourceKey(sourceUrl))
         repoRow.imported++
         result.imported++

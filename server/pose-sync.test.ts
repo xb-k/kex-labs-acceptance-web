@@ -116,6 +116,14 @@ function posePaths(repo: string, count: number): string[] {
   return Array.from({ length: count }, (_, i) => `poses/${repo.split('/')[1]}-${i + 1}.png`)
 }
 
+function treeWithShas(items: Array<{ path: string; sha: string }>) {
+  return {
+    body: {
+      tree: items.map((item) => ({ path: item.path, type: 'blob', size: 1024, sha: item.sha }))
+    }
+  }
+}
+
 function run(
   root: string,
   fetchImpl: FetchLike,
@@ -299,6 +307,31 @@ test('去重：已存在的 source_url 跳过并计 duplicate_source_url', async
   assert.equal(result.imported, 2)
   assert.equal(result.skip_reasons.duplicate_source_url, 1)
   assert.equal(readPoseEntries(root, readJson).length, 3)
+})
+
+test('#169 内容去重：两个仓库同 blob sha 只导入 1 张，另一个计 duplicate_content', async () => {
+  const root = tempRoot()
+  const sha = 'f'.repeat(40)
+  const { fetchImpl } = makeFetch({
+    search: () => ({ body: { items: [repoItem('acme/pose-fork-a'), repoItem('acme/pose-fork-b')] } }),
+    tree: (repo) =>
+      treeWithShas([
+        { path: `poses/${repo.split('/')[1]}-1.png`, sha },
+        { path: `poses/${repo.split('/')[1]}-2.png`, sha: 'a'.repeat(40) }
+      ])
+  })
+  const result = expectOk(await run(root, fetchImpl))
+  // fork-a 导入 2 张；fork-b 的同内容 2 张全部跳过。
+  assert.equal(result.imported, 2)
+  assert.equal(result.skip_reasons.duplicate_content, 2)
+
+  const entries = readPoseEntries(root, readJson)
+  assert.equal(entries.length, 2)
+  assert.equal(entries.every((entry) => /^[0-9a-f]{40}$/.test(String(entry.content_sha))), true)
+  assert.deepEqual(
+    entries.map((entry) => entry.content_sha),
+    [sha, 'a'.repeat(40)]
+  )
 })
 
 test('单次上限 50 张：6 个仓库各 10 张只入库 50 张', async () => {

@@ -8,6 +8,8 @@
  * 契约：
  *  - 必填 `label_zh`（含中文、≤60 字）、`source_url`（https）、`license`、
  *    `license_evidence_url`（https）；`license_verified` 由服务端派生为 true；
+ *  - `content_sha` 可选（git blob 内容哈希，40/64 位 hex）：非空时全局唯一，
+ *    重复入库 409 `duplicate_content`；
  *  - `source_url` 归一化后唯一，重复入库 409 `duplicate_source_url`；
  *  - `preview_url` 可选：https，或以 `/` 开头的本服务数据路径；
  *  - `suitable_shots` 仅限枚举值；`tags` 最多 10 个；
@@ -72,6 +74,8 @@ export type PoseEntry = {
   suitable_shots: SuitableShot[]
   tags: string[]
   note: string
+  /** #169：git blob 内容哈希；旧条目可能没有该字段。 */
+  content_sha?: string | null
   created_at: string
 }
 
@@ -186,6 +190,19 @@ export function validatePoseInput(body: unknown): ValidationResult {
     return { ok: false, status: 400, error: 'source_url_invalid' }
   }
 
+  // #169：内容哈希可选；给了就必须是 git blob 的 40/64 位 hex。
+  let contentSha: string | null = null
+  if (input.content_sha !== undefined && input.content_sha !== null && input.content_sha !== '') {
+    if (typeof input.content_sha !== 'string') {
+      return { ok: false, status: 400, error: 'content_sha_invalid' }
+    }
+    const trimmed = input.content_sha.trim().toLowerCase()
+    if (!/^[0-9a-f]{40}$/.test(trimmed) && !/^[0-9a-f]{64}$/.test(trimmed)) {
+      return { ok: false, status: 400, error: 'content_sha_invalid' }
+    }
+    contentSha = trimmed
+  }
+
   const previewRaw = input.preview_url
   if (previewRaw !== undefined && previewRaw !== null && previewRaw !== '' && !isValidPreviewUrl(previewRaw)) {
     return { ok: false, status: 400, error: 'preview_url_invalid' }
@@ -242,7 +259,8 @@ export function validatePoseInput(body: unknown): ValidationResult {
       license_evidence_url: evidence,
       suitable_shots: suitable,
       tags,
-      note
+      note,
+      content_sha: contentSha
     }
   }
 }
@@ -278,7 +296,7 @@ function withFileLock<T>(file: string, fn: () => T | Promise<T>): Promise<T> {
 
 export type AddPoseResult =
   | { ok: true; item: PoseEntry }
-  | { ok: false; status: 409; error: 'duplicate_source_url' }
+  | { ok: false; status: 409; error: 'duplicate_content' | 'duplicate_source_url' }
 
 export async function addPoseEntry(opts: {
   dataRoot: string
@@ -289,14 +307,28 @@ export async function addPoseEntry(opts: {
 }): Promise<AddPoseResult> {
   const file = poseLibraryFile(opts.dataRoot)
   const key = sourceKey(opts.value.source_url)
+  const contentSha = opts.value.content_sha ? opts.value.content_sha.trim().toLowerCase() : ''
   return withFileLock(file, () => {
     const entries = readPoseEntries(opts.dataRoot, opts.readJson)
+    // #169：内容相同（如跨 fork / 镜像同 blob）优先于来源判重。
+    if (contentSha) {
+      const dupContent = entries.some(
+        (entry) =>
+          String(entry.content_sha ?? '')
+            .trim()
+            .toLowerCase() === contentSha
+      )
+      if (dupContent) {
+        return { ok: false, status: 409, error: 'duplicate_content' }
+      }
+    }
     if (entries.some((entry) => sourceKey(String(entry.source_url ?? '')) === key)) {
       return { ok: false, status: 409, error: 'duplicate_source_url' }
     }
     const item: PoseEntry = {
       id: `pose_${crypto.randomUUID()}`,
       ...opts.value,
+      content_sha: contentSha || null,
       license_verified: true,
       created_at: (opts.now?.() ?? new Date()).toISOString()
     }
@@ -340,6 +372,18 @@ function parseNonNegativeInt(raw: string | null, fallback: number): number | nul
   return Number.isSafeInteger(n) && n >= 0 ? n : null
 }
 
+/**
+ * #169 查询去重键：content_sha 优先，其次非空 preview_url，最后 source_url 归一化。
+ * 前缀用于隔离三种键空间，避免 sha 与 URL 字面相同被误判重复。
+ */
+function poseDedupeKey(entry: PoseEntry): string {
+  const sha = String(entry.content_sha ?? '').trim().toLowerCase()
+  if (sha) return `sha:${sha}`
+  const preview = String(entry.preview_url ?? '').trim()
+  if (preview) return `preview:${preview}`
+  return `source:${sourceKey(String(entry.source_url ?? ''))}`
+}
+
 export function filterPoseEntries(entries: PoseEntry[], query: PoseLibraryQuery): PoseLibraryFilterResult {
   if (query.license && !POSE_LICENSES.includes(query.license as PoseLicense)) {
     return { ok: false, status: 400, error: 'license_invalid' }
@@ -352,10 +396,20 @@ export function filterPoseEntries(entries: PoseEntry[], query: PoseLibraryQuery)
   }
 
   const needle = query.q.trim().toLowerCase()
-  const matched = entries
+  // #169：先稳定排序（created_at desc，同刻按 id desc），再按内容/预览/来源去重，
+  // 保留排序后的第一条；total 为去重后的匹配数，分页不会重复或漏条。
+  const sorted = entries
     .slice()
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    .filter((entry) => {
+    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
+  const seen = new Set<string>()
+  const deduped: PoseEntry[] = []
+  for (const entry of sorted) {
+    const key = poseDedupeKey(entry)
+    if (seen.has(key)) continue
+    seen.add(key)
+    deduped.push(entry)
+  }
+  const matched = deduped.filter((entry) => {
       if (query.license && entry.license !== query.license) return false
       if (query.shot && !entry.suitable_shots.includes(query.shot as SuitableShot)) return false
       if (!needle) return true
