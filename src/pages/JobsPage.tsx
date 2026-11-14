@@ -73,15 +73,17 @@ export function studioJobThumbKind(
 }
 
 /**
- * #160: 缩略候选链 —— 成功任务只用 NAS 已发布媒体（video: final.mp4 /
- * image: image-01.png）；无 NAS 媒体返回空数组直接用图标，不再回退 studio
- * artifact（旧 job 的 artifact 已清理，回退只会得到 404）。未完成任务同样为空。
+ * #160: 缩略候选链 —— 成功任务按 NAS 契约 URL 出图（video: final.mp4 /
+ * image: image-01.png），不依赖 `GET /api/media/jobs?limit=100`（列表会被
+ * 截断，未命中不代表文件不存在）；media 里有更精确的文件名时优先。不再回退
+ * studio artifact（旧 job 的 artifact 已清理）。未完成任务返回空数组。
  */
 export function studioJobThumbSources(job: StudioJobSummary, media: MediaJobItem[] = []): string[] {
   if (job.status !== 'succeeded') return []
-  const prefer = job.type === 'image' ? 'image' : 'video'
-  const nas = pickJobMedia(media, job.id, prefer)
-  return nas ? [nas.url] : []
+  const isImage = job.type === 'image'
+  const nas = pickJobMedia(media, job.id, isImage ? 'image' : 'video')
+  if (nas) return [nas.url]
+  return [`/api/media/jobs/${job.id}/${isImage ? 'image-01.png' : 'final.mp4'}`]
 }
 
 /** #159: /jobs 工坊行左侧真实缩略（NAS → 图标，加载失败不显示破图）。 */

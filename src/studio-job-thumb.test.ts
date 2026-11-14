@@ -80,19 +80,30 @@ test('#159 成功图片任务行渲染 NAS image-01.png 缩略', () => {
   assert.doesNotMatch(html, /\/api\/studio\/jobs\//)
 })
 
-test('#160 成功任务无 NAS 媒体时返回空候选链（图标），不回退 studio artifact', () => {
-  assert.deepEqual(studioJobThumbSources(summary()), [])
-  assert.deepEqual(studioJobThumbSources(summary({ type: 'image' })), [])
+test('#160 成功任务无 NAS 列表命中时仍按 NAS 契约 URL 出缩略，不回退 studio artifact', () => {
+  assert.deepEqual(studioJobThumbSources(summary()), [
+    '/api/media/jobs/web-20261114120000-abcd12/final.mp4'
+  ])
+  assert.deepEqual(studioJobThumbSources(summary({ type: 'image' })), [
+    '/api/media/jobs/web-20261114120000-abcd12/image-01.png'
+  ])
   const video = renderRow()
-  assert.match(video, /data-thumb-kind="icon"/)
-  assert.match(video, /<svg/)
-  assert.doesNotMatch(video, /final\.mp4/)
+  assert.match(video, /data-thumb-kind="video"/)
+  assert.match(video, /data-thumb-source="nas"/)
+  assert.match(video, /src="\/api\/media\/jobs\/web-20261114120000-abcd12\/final\.mp4"/)
   assert.doesNotMatch(video, /\/api\/studio\/jobs\//)
 
   const image = renderRow({ type: 'image' })
-  assert.match(image, /data-thumb-kind="icon"/)
-  assert.doesNotMatch(image, /image-01\.png/)
+  assert.match(image, /data-thumb-kind="image"/)
+  assert.match(image, /data-thumb-source="nas"/)
+  assert.match(image, /src="\/api\/media\/jobs\/web-20261114120000-abcd12\/image-01\.png"/)
   assert.doesNotMatch(image, /\/api\/studio\/jobs\//)
+})
+
+test('#160 media 命中更精确文件名时优先于契约 URL', () => {
+  const html = renderRow({}, [mediaItem('final-v2.mp4', 'video')])
+  assert.match(html, /src="\/api\/media\/jobs\/web-20261114120000-abcd12\/final-v2\.mp4"/)
+  assert.doesNotMatch(html, /\/final\.mp4"/)
 })
 
 test('#159 失败任务行不出媒体，回退 Film 图标', () => {
