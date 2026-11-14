@@ -47,6 +47,8 @@ export const LIST_LIMIT_MAX = 100
 // #138 materialize：预览图抓取预算与允许类型。
 const PREVIEW_MAX_BYTES = 15 * 1024 * 1024
 const PREVIEW_TIMEOUT_MS = 20_000
+// GitHub contents API 走的是同一条出口，大图（>1MB）在 NAS 慢链路上会超过 20s。
+const PREVIEW_API_TIMEOUT_MS = 60_000
 const PREVIEW_MIME_EXT: Record<string, string> = {
   'image/png': '.png',
   'image/jpeg': '.jpg',
@@ -115,6 +117,39 @@ function sourceKey(raw: string): string {
   } catch {
     return raw.trim()
   }
+}
+
+/**
+ * `raw.githubusercontent.com` 直链 → GitHub contents API 等价 URL。
+ * NAS 容器到 raw 域名的 DNS 只解析出 IPv6（无路由），但 api.github.com 可达，
+ * 因此抓图失败时用 contents API + `Accept: application/vnd.github.raw` 兜底。
+ * 非 raw 直链或路径不足 `<owner>/<repo>/<ref>/<path>` 时返回 null。
+ */
+export function normalizeGithubRawUrl(raw: string): string | null {
+  let url: URL
+  try {
+    url = new URL(raw.trim())
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'raw.githubusercontent.com') {
+    return null
+  }
+  const parts = url.pathname.split('/').filter(Boolean)
+  if (parts.length < 4) return null
+  const [owner, repo, ref, ...rest] = parts
+  return `https://api.github.com/repos/${owner}/${repo}/contents/${rest.join('/')}?ref=${encodeURIComponent(ref)}`
+}
+
+/** contents API 抓 raw 内容所需请求头；token 只用于请求，不落日志/响应。 */
+export function githubRawHeaders(env: NodeJS.ProcessEnv = {}): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github.raw',
+    'User-Agent': 'kex-acceptance-web-pose-preview'
+  }
+  const token = env.GITHUB_TOKEN?.trim()
+  if (token) headers.Authorization = `Bearer ${token}`
+  return headers
 }
 
 function isValidPreviewUrl(value: unknown): value is string {
@@ -422,9 +457,31 @@ function readLocalPreview(dataRoot: string, previewUrl: string): PreviewResult {
   }
 }
 
+type FetchAttempt =
+  | { ok: true; response: Response }
+  | { ok: false; reason: string }
+
+async function fetchPreviewAttempt(
+  fetchImpl: FetchLike,
+  target: string,
+  init: RequestInit | undefined,
+  timeoutMs: number
+): Promise<FetchAttempt> {
+  try {
+    const response = await fetchImpl(target, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+    if (!response.ok) return { ok: false, reason: `status_${response.status}` }
+    return { ok: true, response }
+  } catch {
+    return { ok: false, reason: 'fetch_failed' }
+  }
+}
+
 /** `preview_url` 只接受 https 或站内 `/media/artifact`；其它一律视为抓取失败。 */
 async function loadPosePreview(
-  deps: Pick<PoseLibraryDeps, 'dataRoot' | 'fetchImpl'>,
+  deps: Pick<PoseLibraryDeps, 'dataRoot' | 'fetchImpl' | 'env'>,
   previewUrl: string
 ): Promise<PreviewResult> {
   if (previewUrl.startsWith('/') && !previewUrl.startsWith('//')) {
@@ -439,17 +496,32 @@ async function loadPosePreview(
   if (url.protocol !== 'https:') return { ok: false, reason: 'unsupported_protocol' }
 
   const fetchImpl: FetchLike = deps.fetchImpl ?? ((input, init) => fetch(input, init))
+  const primary = await fetchPreviewAttempt(fetchImpl, url.toString(), undefined, PREVIEW_TIMEOUT_MS)
   let response: Response
-  try {
-    response = await fetchImpl(url.toString(), {
-      signal: AbortSignal.timeout(PREVIEW_TIMEOUT_MS)
-    })
-  } catch {
-    return { ok: false, reason: 'fetch_failed' }
+  let viaGithubApi = false
+  if (primary.ok) {
+    response = primary.response
+  } else {
+    const apiUrl = normalizeGithubRawUrl(url.toString())
+    if (!apiUrl) return { ok: false, reason: primary.reason }
+    const env = deps.env ?? process.env
+    const fallback = await fetchPreviewAttempt(
+      fetchImpl,
+      apiUrl,
+      { headers: githubRawHeaders(env) },
+      PREVIEW_API_TIMEOUT_MS
+    )
+    if (!fallback.ok) {
+      return { ok: false, reason: `${primary.reason}|github_api_${fallback.reason}` }
+    }
+    response = fallback.response
+    viaGithubApi = true
   }
-  if (!response.ok) return { ok: false, reason: `status_${response.status}` }
   const mime = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
-  const ext = PREVIEW_MIME_EXT[mime]
+  // contents API 的 raw 响应是 `application/vnd.github.raw`，类型从路径后缀补。
+  const ext =
+    PREVIEW_MIME_EXT[mime] ??
+    (viaGithubApi ? PREVIEW_FILE_EXT[path.extname(url.pathname).toLowerCase()] : undefined)
   if (!ext) return { ok: false, reason: 'unsupported_type' }
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > PREVIEW_MAX_BYTES) {

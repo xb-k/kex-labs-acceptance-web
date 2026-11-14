@@ -18,7 +18,9 @@ import { authorizeTaskWrite, readJson } from './api'
 import {
   addPoseEntry,
   filterPoseEntries,
+  githubRawHeaders,
   handlePoseLibraryRoute,
+  normalizeGithubRawUrl,
   normalizeSourceUrl,
   poseLibraryDir,
   poseLibraryFile,
@@ -510,6 +512,90 @@ function pngFetch(bytes = PNG): FetchLike {
   return async () =>
     new Response(bytes, { status: 200, headers: { 'Content-Type': 'image/png' } })
 }
+
+test('normalizeGithubRawUrl：raw 直链归一为 contents API，非 raw 不转换', () => {
+  assert.equal(
+    normalizeGithubRawUrl(
+      'https://raw.githubusercontent.com/dmlc/gluon-cv/HEAD/docs/_static/action-recognition.png'
+    ),
+    'https://api.github.com/repos/dmlc/gluon-cv/contents/docs/_static/action-recognition.png?ref=HEAD'
+  )
+  // 非 raw 域名 / 非 https / 路径不足 owner+repo+ref+path 一律不转换。
+  assert.equal(normalizeGithubRawUrl('https://cdn.example.com/a/b/main/x.png'), null)
+  assert.equal(normalizeGithubRawUrl('https://raw.githubusercontent.com/dmlc/gluon-cv/HEAD'), null)
+  assert.equal(normalizeGithubRawUrl('http://raw.githubusercontent.com/dmlc/gluon-cv/HEAD/x.png'), null)
+})
+
+test('githubRawHeaders：Accept raw；GITHUB_TOKEN 非空才加 Bearer', () => {
+  const anonymous = githubRawHeaders({} as NodeJS.ProcessEnv)
+  assert.equal(anonymous.Accept, 'application/vnd.github.raw')
+  assert.equal(anonymous.Authorization, undefined)
+  assert.equal(githubRawHeaders({ GITHUB_TOKEN: '  ' } as NodeJS.ProcessEnv).Authorization, undefined)
+  assert.equal(
+    githubRawHeaders({ GITHUB_TOKEN: 'tok-mock' } as NodeJS.ProcessEnv).Authorization,
+    'Bearer tok-mock'
+  )
+})
+
+test('materialize：raw 直链失败时用 contents API 兜底（带 raw Accept + token）', async () => {
+  const raw = 'https://raw.githubusercontent.com/dmlc/gluon-cv/HEAD/docs/_static/a.png'
+  const entry = await createPose(raw)
+  const calls: Array<{ url: string; init?: RequestInit }> = []
+  deps.env = { ...(deps.env ?? {}), GITHUB_TOKEN: 'tok-mock' }
+  previewFetch = async (url, init) => {
+    calls.push({ url, init })
+    if (url === raw) throw new Error('raw egress blocked')
+    return new Response(PNG, {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.github.raw' }
+    })
+  }
+
+  try {
+    const res = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+    assert.equal(res.status, 200)
+    assert.equal(res.body.filename, `pose-${entry.id}.png`)
+    assert.deepEqual(fs.readFileSync(path.join(root, 'uploads', res.body.upload_id, 'source.png')), PNG)
+    assert.equal(calls.length, 2)
+    assert.equal(
+      calls[1].url,
+      'https://api.github.com/repos/dmlc/gluon-cv/contents/docs/_static/a.png?ref=HEAD'
+    )
+    const headers = calls[1].init?.headers as Record<string, string>
+    assert.equal(headers.Accept, 'application/vnd.github.raw')
+    assert.equal(headers.Authorization, 'Bearer tok-mock')
+  } finally {
+    deps.env = { WEB_WRITE_TOKEN: TOKEN }
+  }
+})
+
+test('materialize：原 URL 与 API 兜底都失败才 400，reason 记录两段错误', async () => {
+  const raw = 'https://raw.githubusercontent.com/dmlc/gluon-cv/HEAD/docs/_static/b.png'
+  const entry = await createPose(raw)
+  previewFetch = async (url) => {
+    if (url === raw) throw new Error('raw egress blocked')
+    return new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  const res = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+  assert.equal(res.status, 400)
+  assert.equal(res.body.error, 'preview_unavailable')
+  assert.equal(res.body.reason, 'fetch_failed|github_api_status_404')
+})
+
+test('materialize：非 GitHub URL 失败不触发 API 兜底', async () => {
+  const entry = await createPose('https://cdn.example.com/broken.png')
+  const calls: string[] = []
+  previewFetch = async (url) => {
+    calls.push(url)
+    throw new Error('cdn down')
+  }
+
+  const res = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+  assert.equal(res.status, 400)
+  assert.equal(res.body.reason, 'fetch_failed')
+  assert.deepEqual(calls, ['https://cdn.example.com/broken.png'])
+})
 
 test('materialize 成功：HTTPS PNG 落盘 uploads、meta ready 并转发 studio', async () => {
   const entry = await createPose('https://cdn.example.com/pose.png')
