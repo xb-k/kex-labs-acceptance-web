@@ -17,6 +17,12 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import {
+  readPoseSyncStatus,
+  runPoseSync,
+  type FetchLike,
+  type PoseSyncResult
+} from './pose-sync'
 
 export const POSE_LICENSES = [
   'CC0',
@@ -322,6 +328,9 @@ export type PoseLibraryDeps = {
   readBody: (req: IncomingMessage) => Promise<unknown>
   authorize: (req: IncomingMessage) => { ok: true } | { ok: false; status: number; error: string }
   sendJson: (res: ServerResponse, status: number, body: unknown) => void
+  /** 测试注入；生产默认全局 fetch / process.env。 */
+  fetchImpl?: FetchLike
+  env?: NodeJS.ProcessEnv
   now?: () => Date
 }
 
@@ -355,6 +364,84 @@ export async function handlePoseLibraryRoute(
   pathname: string,
   deps: PoseLibraryDeps
 ): Promise<boolean> {
+  if (pathname === '/api/pose-library/sync-status') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      methodNotAllowed(res, 'GET, HEAD')
+      return true
+    }
+    deps.sendJson(res, 200, readPoseSyncStatus(deps.dataRoot, deps.readJson))
+    return true
+  }
+
+  if (pathname === '/api/pose-library/sync') {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res, 'POST')
+      return true
+    }
+    const auth = deps.authorize(req)
+    if (!auth.ok) {
+      deps.sendJson(res, auth.status, { error: auth.error })
+      return true
+    }
+    let body: any = {}
+    try {
+      body = await deps.readBody(req)
+    } catch (err) {
+      // 空 body 视为 {}（force 默认 false）；其它解析错误照旧 400。
+      if (!(err instanceof Error && err.message === 'empty body')) {
+        deps.sendJson(res, 400, { error: err instanceof Error ? err.message : 'bad body' })
+        return true
+      }
+    }
+    if (body !== null && typeof body !== 'object') {
+      deps.sendJson(res, 400, { error: 'body_invalid' })
+      return true
+    }
+    const force = (body as { force?: unknown })?.force === true
+    const outcome = await runPoseSync({
+      dataRoot: deps.dataRoot,
+      readJson: deps.readJson,
+      atomicWriteJson: deps.atomicWriteJson,
+      fetchImpl: deps.fetchImpl,
+      env: deps.env,
+      now: deps.now,
+      force,
+      addPoseEntry: (value) =>
+        addPoseEntry({
+          dataRoot: deps.dataRoot,
+          value,
+          readJson: deps.readJson,
+          atomicWriteJson: deps.atomicWriteJson,
+          now: deps.now
+        })
+    })
+    if (!outcome.ok) {
+      deps.sendJson(res, outcome.status, {
+        error: outcome.error,
+        ...(outcome.error === 'sync_too_soon'
+          ? {
+              last_at: outcome.last_at,
+              next_at: outcome.next_at,
+              retry_after_ms: outcome.retry_after_ms
+            }
+          : {})
+      })
+      return true
+    }
+    const result: PoseSyncResult = outcome.result
+    // 匿名限速且一张都没导入：明确 429，不返回成功假象。
+    if (result.rate_limit.limited && result.imported === 0) {
+      deps.sendJson(res, 429, {
+        error: 'github_rate_limited',
+        message: 'GitHub API 已限速（匿名每小时 60 次），可配置 GITHUB_TOKEN 后重试',
+        ...result
+      })
+      return true
+    }
+    deps.sendJson(res, 200, result)
+    return true
+  }
+
   if (pathname === '/api/pose-library') {
     if (req.method === 'GET' || req.method === 'HEAD') {
       const query = parseQuery(url)

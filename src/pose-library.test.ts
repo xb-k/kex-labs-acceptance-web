@@ -14,18 +14,23 @@ import {
   buildPoseLibraryQuery,
   createPoseEntry,
   formatPoseError,
+  formatPoseSyncStatus,
+  getPoseSyncStatus,
   listPoseEntries,
   parsePoseTags,
   removePoseEntry,
+  runPoseSync,
   validatePoseDraft,
   type PoseLibraryItem,
-  type PosePayload
+  type PosePayload,
+  type PoseSyncResult
 } from './pose-library'
 import {
   PoseAddDialog,
   PoseLibraryEmpty,
   PoseLibraryGrid,
-  PoseLibraryPanel
+  PoseLibraryPanel,
+  PoseSyncBar
 } from './components/studio/PoseLibraryPanel'
 
 const ITEM: PoseLibraryItem = {
@@ -390,4 +395,93 @@ test('#138 grid 断点：父容器窄时单列，lg 两列，2xl 三列', () => 
   const markup = html(createElement(PoseLibraryGrid, { items: [ITEM] }))
   assert.match(markup, /class="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3" data-testid="pose-grid"/)
   assert.doesNotMatch(markup, /(^|[\s"])sm:grid-cols-2|(^|[\s"])xl:grid-cols-3/)
+})
+
+// ---------------------------------------------------------------------------
+// #138 增强：从 GitHub 同步（状态行 / 按钮 / API 契约）
+// ---------------------------------------------------------------------------
+
+const SYNC_RESULT: PoseSyncResult = {
+  at: '2026-11-14T02:30:00.000Z',
+  imported: 12,
+  skipped: 3,
+  errors: [{ at: '2026-11-14T02:30:00.000Z', stage: 'tree', error: 'http_404', repo: 'a/b' }],
+  repos: [
+    { repo: 'acme/awesome-poses', stars: 1200, license: 'MIT', imported: 12, skipped: 0, reason: null }
+  ],
+  rate_limit: { limited: false, status: null, remaining: 42, auth: 'anonymous' },
+  skip_reasons: { duplicate_source_url: 3 }
+}
+
+test('#138 同步状态文案：未同步 / 上次时间 + 导入 + 跳过 + 错误数', () => {
+  assert.equal(formatPoseSyncStatus(null), '尚未同步')
+  const text = formatPoseSyncStatus(SYNC_RESULT)
+  assert.match(text, /^上次同步 2026-11-14 \d{2}:\d{2}/)
+  assert.match(text, /导入 12/)
+  assert.match(text, /跳过 3/)
+  assert.match(text, /错误 1/)
+})
+
+test('#138 SSR 同步状态行：状态 + 「从 GitHub 同步」按钮；busy 时禁用并显示「同步中…」', () => {
+  const idle = html(createElement(PoseSyncBar, { status: SYNC_RESULT, busy: false, error: null, onSync: () => {} }))
+  assert.match(idle, /data-testid="pose-sync-bar"/)
+  assert.match(idle, /data-testid="pose-sync-status"[^>]*>上次同步 2026-11-14/)
+  assert.match(idle, /data-testid="pose-sync-status"[^>]*>[^<]*导入 12/)
+  assert.match(idle, /data-testid="pose-sync-button"/)
+  assert.match(idle, />从 GitHub 同步</)
+  assert.doesNotMatch(idle, /data-testid="pose-sync-button"[^>]*disabled=""/)
+
+  const busy = html(createElement(PoseSyncBar, { status: null, busy: true, error: '同步失败：429', onSync: () => {} }))
+  assert.match(busy, /data-testid="pose-sync-status"[^>]*>尚未同步/)
+  assert.match(busy, /data-testid="pose-sync-button"[^>]*disabled/)
+  assert.match(busy, />同步中…</)
+  assert.match(busy, /data-testid="pose-sync-error"[^>]*>同步失败：429/)
+})
+
+test('#138 SSR 面板顶部包含同步状态行与按钮', () => {
+  const markup = html(createElement(PoseLibraryPanel, {}))
+  assert.match(markup, /data-testid="pose-sync-bar"/)
+  assert.match(markup, /data-testid="pose-sync-status"[^>]*>尚未同步/)
+  assert.match(markup, /data-testid="pose-sync-button"/)
+  assert.match(markup, />从 GitHub 同步</)
+})
+
+test('#138 同步 API：GET sync-status / POST 同步（force 透传）', async () => {
+  const original = globalThis.fetch
+  const calls = stubFetch(() => jsonResponse(SYNC_RESULT))
+  try {
+    const status = await getPoseSyncStatus()
+    assert.equal(status.imported, 12)
+    assert.equal(calls[0].url, '/api/pose-library/sync-status')
+    assert.equal(calls[0].method, 'GET')
+
+    await runPoseSync()
+    assert.equal(calls[1].url, '/api/pose-library/sync')
+    assert.equal(calls[1].method, 'POST')
+    assert.deepEqual(calls[1].body, {})
+
+    await runPoseSync(true)
+    assert.deepEqual(calls[2].body, { force: true })
+  } finally {
+    globalThis.fetch = original
+  }
+
+  const authCalls = stubFetch(() => jsonResponse({ error: 'github_rate_limited' }, 429))
+  try {
+    await assert.rejects(
+      () => runPoseSync(true),
+      (err: unknown) => {
+        assert.ok(err instanceof HttpError)
+        assert.equal(err.status, 429)
+        assert.equal(
+          formatPoseError(err),
+          '429 github_rate_limited（GitHub 已限速，可配置 GITHUB_TOKEN 后重试）'
+        )
+        return true
+      }
+    )
+    assert.equal(authCalls.length, 1)
+  } finally {
+    globalThis.fetch = original
+  }
 })

@@ -56,6 +56,41 @@ export type PoseLibraryList = {
   offset?: number
 }
 
+/** #138 增强：GitHub 同步结果（与 server/pose-sync.ts 对齐）。 */
+export type PoseSyncRateLimit = {
+  limited: boolean
+  status: number | null
+  remaining: number | null
+  auth: 'token' | 'anonymous'
+}
+
+export type PoseSyncError = {
+  at: string
+  stage: 'search' | 'tree' | 'import'
+  error: string
+  repo?: string
+  query?: string
+}
+
+export type PoseSyncRepo = {
+  repo: string
+  stars: number
+  license: PoseLicense | null
+  imported: number
+  skipped: number
+  reason: string | null
+}
+
+export type PoseSyncResult = {
+  at: string | null
+  imported: number
+  skipped: number
+  errors: PoseSyncError[]
+  repos: PoseSyncRepo[]
+  rate_limit: PoseSyncRateLimit
+  skip_reasons?: Record<string, number>
+}
+
 export type PoseFilters = {
   q: string
   license: PoseLicense | ''
@@ -197,7 +232,11 @@ const POSE_ERROR_HINTS: Record<string, string> = {
   tags_invalid: '标签不合法',
   'invalid X-Web-Token': '鉴权失败：X-Web-Token 不正确',
   'same-origin browser request or X-Web-Token required': '鉴权失败：需同源访问或配置 X-Web-Token',
-  'write disabled: WEB_WRITE_TOKEN is not set': '写接口未启用：服务端未配置 WEB_WRITE_TOKEN'
+  'write disabled: WEB_WRITE_TOKEN is not set': '写接口未启用：服务端未配置 WEB_WRITE_TOKEN',
+  sync_too_soon: '距上次同步不足 6 小时，可强制同步',
+  sync_running: '同步进行中，请稍候',
+  github_rate_limited: 'GitHub 已限速，可配置 GITHUB_TOKEN 后重试',
+  body_invalid: '请求体不合法'
 }
 
 /** 服务端错误原样展示（状态码 + error code），附中文提示；非 HTTP 错误透传 message。 */
@@ -236,4 +275,24 @@ export function formatPoseDate(iso: string): string {
   if (Number.isNaN(date.getTime())) return iso
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+/** 同步状态：上次同步时间 / 导入数 / 跳过数 / 错误数；未同步时为中文提示。 */
+export function formatPoseSyncStatus(status: PoseSyncResult | null): string {
+  if (!status || !status.at) return '尚未同步'
+  const date = new Date(status.at)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const when = Number.isNaN(date.getTime())
+    ? status.at
+    : `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return `上次同步 ${when} · 导入 ${status.imported} · 跳过 ${status.skipped} · 错误 ${status.errors.length}`
+}
+
+export function getPoseSyncStatus(signal?: AbortSignal): Promise<PoseSyncResult> {
+  return getJson<PoseSyncResult>('/api/pose-library/sync-status', signal)
+}
+
+/** POST /api/pose-library/sync；force 跳过 6 小时最小间隔。 */
+export function runPoseSync(force = false): Promise<PoseSyncResult> {
+  return postJson<PoseSyncResult>('/api/pose-library/sync', force ? { force: true } : {})
 }

@@ -20,15 +20,19 @@ import {
   createPoseEntry,
   formatPoseError,
   formatPoseDate,
+  formatPoseSyncStatus,
+  getPoseSyncStatus,
   poseShotLabel,
   removePoseEntry,
+  runPoseSync,
   validatePoseDraft,
   type PoseDraft,
   type PoseDraftErrors,
   type PoseFilters,
   type PoseLibraryItem,
   type PoseLibraryList,
-  type PoseShot
+  type PoseShot,
+  type PoseSyncResult
 } from '../../pose-library'
 import { Close, Copy, ExternalLink, Film, Plus, Refresh, Trash } from '../icons'
 import { SelectMenu, type SelectMenuOption } from '../SelectMenu'
@@ -619,6 +623,59 @@ export function PoseDeleteDialog({
 }
 
 // ---------------------------------------------------------------------------
+// GitHub 同步状态行
+// ---------------------------------------------------------------------------
+
+/**
+ * 面板顶部状态行：上次同步时间 / 导入 / 跳过 / 错误数 + 「从 GitHub 同步」。
+ * 纯 props 组件，便于 SSR 断言（不触网）。
+ */
+export function PoseSyncBar({
+  status,
+  busy,
+  error,
+  onSync
+}: {
+  status: PoseSyncResult | null
+  busy: boolean
+  error: string | null
+  onSync: () => void
+}) {
+  return (
+    <div
+      data-testid="pose-sync-bar"
+      className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-[12px] bg-black/[0.03] px-3 py-2"
+    >
+      <div className="min-w-0">
+        <p className="num text-[11px] text-apple-subtext" data-testid="pose-sync-status">
+          {formatPoseSyncStatus(status)}
+        </p>
+        {status?.rate_limit.limited && (
+          <p className="mt-0.5 text-[11px] text-[#B42318]" data-testid="pose-sync-rate-limited">
+            GitHub 已限速（{status.rate_limit.auth === 'token' ? 'token' : '匿名'}），可稍后重试
+          </p>
+        )}
+        {error && (
+          <p className="mt-0.5 text-[11px] text-[#B42318]" data-testid="pose-sync-error">
+            {error}
+          </p>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={onSync}
+        disabled={busy}
+        data-testid="pose-sync-button"
+        className={`${quietButton} h-8 shrink-0 gap-1.5 px-3 text-xs`}
+      >
+        <Refresh className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />
+        {busy ? '同步中…' : '从 GitHub 同步'}
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // 面板
 // ---------------------------------------------------------------------------
 
@@ -629,6 +686,9 @@ export function PoseLibraryPanel({ onNotify }: { onNotify?: Notify }) {
   const [confirmEntry, setConfirmEntry] = useState<PoseLibraryItem | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [loadingSince, setLoadingSince] = useState<number | null>(null)
+  const [syncStatus, setSyncStatus] = useState<PoseSyncResult | null>(null)
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
 
   // 搜索防抖 300ms；license / shot 立即生效。
   useEffect(() => {
@@ -674,6 +734,40 @@ export function PoseLibraryPanel({ onNotify }: { onNotify?: Notify }) {
     setConfirmEntry(item)
   }, [])
 
+  // 上次同步状态：失败不阻塞列表展示。
+  useEffect(() => {
+    let cancelled = false
+    getPoseSyncStatus()
+      .then((status) => {
+        if (!cancelled) setSyncStatus(status)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const syncFromGithub = async () => {
+    if (syncBusy) return
+    setSyncBusy(true)
+    setSyncError(null)
+    try {
+      const result = await runPoseSync()
+      setSyncStatus(result)
+      listing.refresh()
+      onNotify?.(`已从 GitHub 导入 ${result.imported} 条，跳过 ${result.skipped} 条`)
+      if (result.rate_limit.limited) {
+        onNotify?.('GitHub 已限速，本次结果可能不完整', 'err')
+      }
+    } catch (err) {
+      const message = formatPoseError(err)
+      setSyncError(message)
+      onNotify?.(`GitHub 同步失败：${message}`, 'err')
+    } finally {
+      setSyncBusy(false)
+    }
+  }
+
   return (
     <section className="card p-5" aria-labelledby="pose-library-title" data-testid="pose-library">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -700,6 +794,13 @@ export function PoseLibraryPanel({ onNotify }: { onNotify?: Notify }) {
           </button>
         </div>
       </div>
+
+      <PoseSyncBar
+        status={syncStatus}
+        busy={syncBusy}
+        error={syncError}
+        onSync={() => void syncFromGithub()}
+      />
 
       <div className="mt-3.5 flex flex-wrap items-center gap-2">
         <input
