@@ -5,12 +5,14 @@
  * 路由与生产共用 `handlePoseLibraryRoute`。
  */
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { after, before, test } from 'node:test'
 import type { AddressInfo } from 'node:net'
+import type { FetchLike } from './pose-sync'
 
 import { authorizeTaskWrite, readJson } from './api'
 import {
@@ -220,13 +222,53 @@ test('filterPoseEntries：q / license / shot 组合过滤，非法过滤值 400'
 // ---------------------------------------------------------------------------
 
 let server: http.Server
+let intakeServer: http.Server
 let root = ''
 let base = ''
 let tick = 0
 let deps: PoseLibraryDeps
+let previewFetch: FetchLike = async () => {
+  throw new Error('preview fetch not configured for this test')
+}
+let intakeMode: 'ok' | 'reject' = 'ok'
+let intakeCalls = 0
+let poseSeq = 0
 
 before(async () => {
   root = freshRoot()
+  intakeServer = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/intake/uploads') {
+      const chunks: Buffer[] = []
+      req.on('data', (chunk: Buffer) => chunks.push(chunk))
+      req.on('end', () => {
+        const body = Buffer.concat(chunks)
+        if (intakeMode === 'reject') {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: 'intake_boom' }))
+          return
+        }
+        intakeCalls += 1
+        const id = String(req.headers['x-upload-id'] ?? '')
+        const ext = path.extname(String(req.headers['x-filename'] ?? ''))
+        res.statusCode = 201
+        res.setHeader('Content-Type', 'application/json')
+        res.end(
+          JSON.stringify({
+            upload_id: id,
+            path: `/studio/uploads/${id}/source${ext}`,
+            size: body.length,
+            sha256: crypto.createHash('sha256').update(body).digest('hex')
+          })
+        )
+      })
+      return
+    }
+    res.statusCode = 404
+    res.end('{}')
+  })
+  await new Promise<void>((resolve) => intakeServer.listen(0, '127.0.0.1', resolve))
+  const intakeUrl = `http://127.0.0.1:${(intakeServer.address() as AddressInfo).port}`
+
   const env = { WEB_WRITE_TOKEN: TOKEN } as NodeJS.ProcessEnv
   deps = {
     dataRoot: root,
@@ -254,7 +296,9 @@ before(async () => {
       res.setHeader('Content-Type', 'application/json')
       res.end(JSON.stringify(body))
     },
-    now: () => new Date(Date.UTC(2026, 10, 14, 0, 0, tick++))
+    now: () => new Date(Date.UTC(2026, 10, 14, 0, 0, tick++)),
+    fetchImpl: (input, init) => previewFetch(input, init),
+    uploads: { intakeUrl, webToken: TOKEN }
   }
   server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
@@ -276,6 +320,7 @@ before(async () => {
 
 after(() => {
   server.close()
+  intakeServer.close()
 })
 
 function resetLibrary(): void {
@@ -442,4 +487,147 @@ test('落盘为完整 JSON 数组且无临时文件残留', async () => {
     fs.readdirSync(poseLibraryDir(root)).filter((name) => name.includes('.tmp-')),
     []
   )
+})
+
+// ---------------------------------------------------------------------------
+// #138 materialize：pose preview → uploads → studio intake
+// ---------------------------------------------------------------------------
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02])
+
+async function createPose(previewUrl: string | null) {
+  poseSeq += 1
+  const res = await post({
+    ...BASE,
+    source_url: `https://example.com/poses/materialize-${poseSeq}`,
+    preview_url: previewUrl
+  })
+  assert.equal(res.status, 201)
+  return res.body.item as any
+}
+
+function pngFetch(bytes = PNG): FetchLike {
+  return async () =>
+    new Response(bytes, { status: 200, headers: { 'Content-Type': 'image/png' } })
+}
+
+test('materialize 成功：HTTPS PNG 落盘 uploads、meta ready 并转发 studio', async () => {
+  const entry = await createPose('https://cdn.example.com/pose.png')
+  previewFetch = pngFetch()
+  const before = intakeCalls
+
+  const res = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+  assert.equal(res.status, 200)
+  assert.match(String(res.body.upload_id), /^up-/)
+  assert.equal(res.body.filename, `pose-${entry.id}.png`)
+  assert.equal(res.body.size, PNG.length)
+  assert.equal(res.body.sha256, crypto.createHash('sha256').update(PNG).digest('hex'))
+  assert.equal(res.body.studio_path, `/studio/uploads/${res.body.upload_id}/source.png`)
+  assert.equal(intakeCalls, before + 1)
+
+  const dir = path.join(root, 'uploads', res.body.upload_id)
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'source.png')), PNG)
+  const meta = readJson(path.join(dir, 'meta.json'))
+  assert.equal(meta.status, 'ready')
+  assert.equal(meta.studio_path, res.body.studio_path)
+  assert.equal(meta.pose_id, entry.id)
+  assert.equal(meta.source_url, entry.source_url)
+})
+
+test('materialize 成功：站内 /media/artifact 预览路径', async () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x01])
+  fs.mkdirSync(path.join(root, 'media'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'media', 'pose-local.jpg'), bytes)
+  const entry = await createPose('/media/artifact?path=media%2Fpose-local.jpg')
+
+  const res = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.filename, `pose-${entry.id}.jpg`)
+  assert.equal(res.body.size, bytes.length)
+  assert.deepEqual(fs.readFileSync(path.join(root, 'uploads', res.body.upload_id, 'source.jpg')), bytes)
+})
+
+test('materialize 拒绝非图片与超限：400 preview_unavailable 且不建 upload', async () => {
+  const uploadsBefore = fs.existsSync(path.join(root, 'uploads'))
+    ? fs.readdirSync(path.join(root, 'uploads')).length
+    : 0
+  const html = await createPose('https://cdn.example.com/page.html')
+  previewFetch = async () =>
+    new Response('<html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })
+  const htmlRes = await request('POST', `/api/pose-library/${html.id}/materialize`)
+  assert.equal(htmlRes.status, 400)
+  assert.equal(htmlRes.body.error, 'preview_unavailable')
+
+  const big = await createPose('https://cdn.example.com/huge.png')
+  previewFetch = async () =>
+    new Response(PNG, {
+      status: 200,
+      headers: {
+        'Content-Type': 'image/png',
+        'Content-Length': String(15 * 1024 * 1024 + 1)
+      }
+    })
+  const bigRes = await request('POST', `/api/pose-library/${big.id}/materialize`)
+  assert.equal(bigRes.status, 400)
+  assert.equal(bigRes.body.error, 'preview_unavailable')
+
+  const uploadsAfter = fs.existsSync(path.join(root, 'uploads'))
+    ? fs.readdirSync(path.join(root, 'uploads')).length
+    : 0
+  assert.equal(uploadsAfter, uploadsBefore)
+})
+
+test('materialize 404 / 409 / 站内路径穿越', async () => {
+  const missing = await request('POST', '/api/pose-library/pose_missing/materialize')
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.error, 'not_found')
+
+  const noPreview = await createPose(null)
+  const empty = await request('POST', `/api/pose-library/${noPreview.id}/materialize`)
+  assert.equal(empty.status, 409)
+  assert.equal(empty.body.error, 'preview_missing')
+
+  const traversal = await createPose('/media/artifact?path=..%2F..%2Fetc%2Fpasswd')
+  const escaped = await request('POST', `/api/pose-library/${traversal.id}/materialize`)
+  assert.equal(escaped.status, 400)
+  assert.equal(escaped.body.error, 'preview_unavailable')
+})
+
+test('materialize 鉴权：跨源无 token 403、错 token 401', async () => {
+  const entry = await createPose('https://cdn.example.com/auth.png')
+  previewFetch = pngFetch()
+
+  const denied = await request('POST', `/api/pose-library/${entry.id}/materialize`, undefined, {
+    Origin: 'http://evil.example'
+  })
+  assert.equal(denied.status, 403)
+
+  const wrong = await request('POST', `/api/pose-library/${entry.id}/materialize`, undefined, {
+    'X-Web-Token': 'wrong'
+  })
+  assert.equal(wrong.status, 401)
+})
+
+test('materialize staging 失败：502 studio_stage_failed，本地 source/meta 保留可重试', async () => {
+  const entry = await createPose('https://cdn.example.com/stage.png')
+  previewFetch = pngFetch()
+  intakeMode = 'reject'
+  try {
+    const res = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+    assert.equal(res.status, 502)
+    assert.equal(res.body.error, 'studio_stage_failed')
+    assert.match(String(res.body.upload_id), /^up-/)
+
+    const dir = path.join(root, 'uploads', res.body.upload_id)
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'source.png')), PNG)
+    const meta = readJson(path.join(dir, 'meta.json'))
+    assert.equal(meta.status, 'ready')
+    assert.equal(meta.studio_path, null)
+  } finally {
+    intakeMode = 'ok'
+  }
+
+  const retried = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+  assert.equal(retried.status, 200)
+  assert.notEqual(retried.body.upload_id, undefined)
 })

@@ -4672,7 +4672,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
       atomicWriteJson,
       readBody: readRequestBody,
       authorize: (r) => authorizeTaskWrite(r),
-      sendJson
+      sendJson,
+      uploads: {
+        intakeUrl: STUDIO_INTAKE_URL,
+        webToken: process.env.WEB_WRITE_TOKEN ?? null
+      }
     })
     return
   }

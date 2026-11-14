@@ -72,29 +72,34 @@ interface UploadMeta {
   studio_path?: string | null
   /** Last successful `POST /intake/probe` result, persisted verbatim. */
   probe?: UploadProbe | null
+  /** #138 materialize：来源页与姿态条目 id，便于追溯。 */
+  source_url?: string
+  pose_id?: string
 }
 
 function nowIso(): string {
   return new Date().toISOString()
 }
 
-function uploadsRoot(ctx: UploadsContext): string {
+type DataRootContext = Pick<UploadsContext, 'dataRoot'>
+
+function uploadsRoot(ctx: DataRootContext): string {
   return path.join(ctx.dataRoot, 'uploads')
 }
 
-function uploadDir(ctx: UploadsContext, id: string): string {
+function uploadDir(ctx: DataRootContext, id: string): string {
   return path.join(uploadsRoot(ctx), id)
 }
 
-function metaPath(ctx: UploadsContext, id: string): string {
+function metaPath(ctx: DataRootContext, id: string): string {
   return path.join(uploadDir(ctx, id), 'meta.json')
 }
 
-function chunksDir(ctx: UploadsContext, id: string): string {
+function chunksDir(ctx: DataRootContext, id: string): string {
   return path.join(uploadDir(ctx, id), 'chunks')
 }
 
-function sourcePath(ctx: UploadsContext, meta: UploadMeta): string {
+function sourcePath(ctx: DataRootContext, meta: UploadMeta): string {
   return path.join(uploadDir(ctx, meta.upload_id), `source${meta.ext}`)
 }
 
@@ -547,12 +552,14 @@ type StageResult =
   | { ok: true; studioPath: string }
   | { ok: false; status: number; error: string; reason: string }
 
+type StageContext = Pick<UploadsContext, 'dataRoot' | 'intakeUrl' | 'webToken'>
+
 /**
  * Streams the joined source to the studio intake and returns its absolute path.
  * Idempotent on the studio side (same upload id + sha256 → 200), so a failed
  * `complete` can be retried without re-uploading chunks.
  */
-async function stageSource(ctx: UploadsContext, meta: UploadMeta): Promise<StageResult> {
+async function stageSource(ctx: StageContext, meta: UploadMeta): Promise<StageResult> {
   const source = sourcePath(ctx, meta)
   const sha = typeof meta.sha256 === 'string' ? meta.sha256 : ''
   try {
@@ -811,6 +818,121 @@ async function completeUpload(
     sha256: digest,
     filename: meta.filename
   })
+}
+
+/** Materialize 调用方需要的最小上下文（不涉及 HTTP 请求/响应）。 */
+export type UploadBytesContext = Pick<
+  UploadsContext,
+  'dataRoot' | 'intakeUrl' | 'webToken' | 'atomicWriteJson'
+>
+
+export type CreateUploadFromBytesInput = {
+  filename: string
+  bytes: Buffer | Uint8Array
+  /** 可选：预期 sha256；不一致时拒绝。 */
+  sha256?: string
+  /** #138 materialize：写入 meta 供追溯。 */
+  source_url?: string
+  pose_id?: string
+}
+
+export type CreateUploadFromBytesResult =
+  | {
+      ok: true
+      upload_id: string
+      filename: string
+      size: number
+      sha256: string
+      studio_path: string
+    }
+  | {
+      ok: false
+      status: number
+      error: string
+      reason?: string
+      upload_id?: string
+    }
+
+/**
+ * #138：把已在内存里的字节直接落成一个 ready 状态的 upload，再走同一条
+ * studio staging。source 先写临时文件再 rename，meta 用调用方的原子写；
+ * staging 失败时本地 source + `status: 'ready'` 的 meta 保留，可重试。
+ */
+export async function createUploadFromBytes(
+  ctx: UploadBytesContext,
+  input: CreateUploadFromBytesInput
+): Promise<CreateUploadFromBytesResult> {
+  if (filenameRejection(input.filename)) {
+    return { ok: false, status: 400, error: 'invalid_filename' }
+  }
+  const filename = cleanFilename(input.filename)
+  if (!filename) return { ok: false, status: 400, error: 'invalid_filename' }
+  const ext = path.extname(filename).toLowerCase()
+  if (!IMAGE_EXTS.includes(ext)) {
+    return { ok: false, status: 415, error: 'unsupported_type' }
+  }
+  const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes)
+  if (bytes.length === 0) return { ok: false, status: 400, error: 'empty_bytes' }
+  const digest = crypto.createHash('sha256').update(bytes).digest('hex')
+  if (input.sha256 && input.sha256.toLowerCase() !== digest) {
+    return { ok: false, status: 400, error: 'sha256_mismatch' }
+  }
+
+  const id = newUploadId()
+  const dir = uploadDir(ctx, id)
+  const target = path.join(dir, `source${ext}`)
+  const meta: UploadMeta = {
+    upload_id: id,
+    filename,
+    size: bytes.length,
+    sha256: digest,
+    ext,
+    chunk_size: CHUNK_SIZE,
+    status: 'ready',
+    created_at: nowIso(),
+    completed_at: nowIso(),
+    path: target,
+    studio_path: null,
+    ...(input.source_url ? { source_url: input.source_url } : {}),
+    ...(input.pose_id ? { pose_id: input.pose_id } : {})
+  }
+
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
+    fs.writeFileSync(tmp, bytes)
+    fs.renameSync(tmp, target)
+    ctx.atomicWriteJson(metaPath(ctx, id), meta)
+  } catch (err) {
+    fs.rmSync(dir, { recursive: true, force: true })
+    console.error('[uploads] create-from-bytes write failed:', err)
+    return { ok: false, status: 500, error: 'write_failed' }
+  }
+
+  const staged = await stageSource(ctx, meta)
+  if (!staged.ok) {
+    return {
+      ok: false,
+      status: 502,
+      error: 'studio_stage_failed',
+      reason: staged.reason,
+      upload_id: id
+    }
+  }
+  try {
+    ctx.atomicWriteJson(metaPath(ctx, id), { ...meta, studio_path: staged.studioPath })
+  } catch (err) {
+    console.error('[uploads] create-from-bytes meta update failed:', err)
+    return { ok: false, status: 500, error: 'write_failed', upload_id: id }
+  }
+  return {
+    ok: true,
+    upload_id: id,
+    filename,
+    size: bytes.length,
+    sha256: digest,
+    studio_path: staged.studioPath
+  }
 }
 
 /**

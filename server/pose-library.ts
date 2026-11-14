@@ -23,6 +23,7 @@ import {
   type FetchLike,
   type PoseSyncResult
 } from './pose-sync'
+import { createUploadFromBytes } from './uploads'
 
 export const POSE_LICENSES = [
   'CC0',
@@ -42,6 +43,21 @@ export const TAGS_MAX = 10
 export const NOTE_MAX = 500
 export const LIST_LIMIT_DEFAULT = 20
 export const LIST_LIMIT_MAX = 100
+
+// #138 materialize：预览图抓取预算与允许类型。
+const PREVIEW_MAX_BYTES = 15 * 1024 * 1024
+const PREVIEW_TIMEOUT_MS = 20_000
+const PREVIEW_MIME_EXT: Record<string, string> = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp'
+}
+const PREVIEW_FILE_EXT: Record<string, string> = {
+  '.png': '.png',
+  '.jpg': '.jpg',
+  '.jpeg': '.jpg',
+  '.webp': '.webp'
+}
 
 export type PoseEntry = {
   id: string
@@ -332,7 +348,125 @@ export type PoseLibraryDeps = {
   fetchImpl?: FetchLike
   env?: NodeJS.ProcessEnv
   now?: () => Date
+  /** #138 materialize：复用 uploads 的 studio intake 配置。 */
+  uploads?: {
+    intakeUrl: string
+    webToken: string | null
+  }
 }
+
+type PreviewResult =
+  | { ok: true; bytes: Buffer; ext: string }
+  | { ok: false; reason: string }
+
+async function readCapped(response: Response, maxBytes: number): Promise<Buffer | null> {
+  if (!response.body) {
+    const bytes = Buffer.from(await response.arrayBuffer())
+    return bytes.length > maxBytes ? null : bytes
+  }
+  const reader = response.body.getReader()
+  const chunks: Buffer[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined)
+      return null
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks)
+}
+
+function readLocalPreview(dataRoot: string, previewUrl: string): PreviewResult {
+  let url: URL
+  try {
+    url = new URL(previewUrl, 'http://local')
+  } catch {
+    return { ok: false, reason: 'invalid_url' }
+  }
+  // 站内路径只认 /media/artifact?path=…（与 api.ts 的只读媒体口一致）。
+  if (url.pathname !== '/media/artifact') {
+    return { ok: false, reason: 'unsupported_local_path' }
+  }
+  const raw = url.searchParams.get('path')
+  if (!raw) return { ok: false, reason: 'missing_path' }
+
+  let root: string
+  try {
+    root = fs.realpathSync(dataRoot)
+  } catch {
+    root = path.resolve(dataRoot)
+  }
+  let target: string
+  try {
+    target = fs.realpathSync(path.resolve(dataRoot, raw))
+  } catch {
+    return { ok: false, reason: 'preview_not_found' }
+  }
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    return { ok: false, reason: 'path_outside_data_root' }
+  }
+  const ext = PREVIEW_FILE_EXT[path.extname(target).toLowerCase()]
+  if (!ext) return { ok: false, reason: 'unsupported_type' }
+  try {
+    const stat = fs.statSync(target)
+    if (!stat.isFile()) return { ok: false, reason: 'preview_not_found' }
+    if (stat.size <= 0) return { ok: false, reason: 'empty_preview' }
+    if (stat.size > PREVIEW_MAX_BYTES) return { ok: false, reason: 'preview_too_large' }
+    return { ok: true, bytes: fs.readFileSync(target), ext }
+  } catch {
+    return { ok: false, reason: 'preview_not_found' }
+  }
+}
+
+/** `preview_url` 只接受 https 或站内 `/media/artifact`；其它一律视为抓取失败。 */
+async function loadPosePreview(
+  deps: Pick<PoseLibraryDeps, 'dataRoot' | 'fetchImpl'>,
+  previewUrl: string
+): Promise<PreviewResult> {
+  if (previewUrl.startsWith('/') && !previewUrl.startsWith('//')) {
+    return readLocalPreview(deps.dataRoot, previewUrl)
+  }
+  let url: URL
+  try {
+    url = new URL(previewUrl)
+  } catch {
+    return { ok: false, reason: 'invalid_url' }
+  }
+  if (url.protocol !== 'https:') return { ok: false, reason: 'unsupported_protocol' }
+
+  const fetchImpl: FetchLike = deps.fetchImpl ?? ((input, init) => fetch(input, init))
+  let response: Response
+  try {
+    response = await fetchImpl(url.toString(), {
+      signal: AbortSignal.timeout(PREVIEW_TIMEOUT_MS)
+    })
+  } catch {
+    return { ok: false, reason: 'fetch_failed' }
+  }
+  if (!response.ok) return { ok: false, reason: `status_${response.status}` }
+  const mime = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+  const ext = PREVIEW_MIME_EXT[mime]
+  if (!ext) return { ok: false, reason: 'unsupported_type' }
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > PREVIEW_MAX_BYTES) {
+    return { ok: false, reason: 'preview_too_large' }
+  }
+  let bytes: Buffer | null
+  try {
+    bytes = await readCapped(response, PREVIEW_MAX_BYTES)
+  } catch {
+    return { ok: false, reason: 'fetch_failed' }
+  }
+  if (!bytes) return { ok: false, reason: 'preview_too_large' }
+  if (bytes.length === 0) return { ok: false, reason: 'empty_preview' }
+  return { ok: true, bytes, ext }
+}
+
+
 
 function methodNotAllowed(res: ServerResponse, allow: string) {
   res.statusCode = 405
@@ -497,6 +631,73 @@ export async function handlePoseLibraryRoute(
     }
 
     methodNotAllowed(res, 'GET, HEAD, POST')
+    return true
+  }
+
+  const materializeMatch = /^\/api\/pose-library\/([^/]+)\/materialize$/.exec(pathname)
+  if (materializeMatch) {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res, 'POST')
+      return true
+    }
+    const auth = deps.authorize(req)
+    if (!auth.ok) {
+      deps.sendJson(res, auth.status, { error: auth.error })
+      return true
+    }
+    const entry = readPoseEntries(deps.dataRoot, deps.readJson).find(
+      (item) => item.id === materializeMatch[1]
+    )
+    if (!entry) {
+      deps.sendJson(res, 404, { error: 'not_found' })
+      return true
+    }
+    if (!entry.preview_url) {
+      deps.sendJson(res, 409, { error: 'preview_missing' })
+      return true
+    }
+    const uploads = deps.uploads
+    if (!uploads) {
+      deps.sendJson(res, 503, { error: 'upload_unconfigured' })
+      return true
+    }
+    const preview = await loadPosePreview(deps, entry.preview_url)
+    if (!preview.ok) {
+      deps.sendJson(res, 400, { error: 'preview_unavailable', reason: preview.reason })
+      return true
+    }
+    const safeId = entry.id.replace(/[^A-Za-z0-9_-]+/g, '_')
+    const filename = `pose-${safeId}${preview.ext}`
+    const created = await createUploadFromBytes(
+      {
+        dataRoot: deps.dataRoot,
+        intakeUrl: uploads.intakeUrl,
+        webToken: uploads.webToken,
+        atomicWriteJson: deps.atomicWriteJson
+      },
+      {
+        filename,
+        bytes: preview.bytes,
+        sha256: crypto.createHash('sha256').update(preview.bytes).digest('hex'),
+        source_url: entry.source_url,
+        pose_id: entry.id
+      }
+    )
+    if (!created.ok) {
+      deps.sendJson(res, created.status, {
+        error: created.error,
+        ...(created.reason ? { reason: created.reason } : {}),
+        ...(created.upload_id ? { upload_id: created.upload_id } : {})
+      })
+      return true
+    }
+    deps.sendJson(res, 200, {
+      upload_id: created.upload_id,
+      filename: created.filename,
+      size: created.size,
+      sha256: created.sha256,
+      studio_path: created.studio_path
+    })
     return true
   }
 
