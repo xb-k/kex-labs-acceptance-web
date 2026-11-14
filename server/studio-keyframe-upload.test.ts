@@ -72,6 +72,16 @@ function writeJobMetaRaw(id: string, meta: Record<string, unknown>) {
   fs.writeFileSync(jobMetaFile(id), JSON.stringify(meta))
 }
 
+/** #165: synthesized briefs land in the normal briefs directory. */
+function briefCount() {
+  const dir = path.join(dataRoot, 'studio', 'briefs')
+  try {
+    return fs.readdirSync(dir).filter((name) => name.endsWith('.json')).length
+  } catch {
+    return 0
+  }
+}
+
 function writeUpload(id: string, name: string, ext: string, studioPath: string | null, size: number) {
   uploadMetas[id] = {
     upload_id: id,
@@ -184,13 +194,16 @@ test('#165 upload_id → studio_path：intake 收到 {path}，mode/prompt 透传
     '已有 studio_path 时不再重新上传'
   )
   const hit = intakeJobPosts()[0]
-  assert.deepEqual(hit.body, {
+  const { brief_id: synthId, polished, ...rest } = hit.body
+  assert.deepEqual(rest, {
     type: 'aigc',
     rail: 'A',
     keyframe_asset: { path: '/studio/uploads/up-pose-ok01/pose-standing.png' },
     mode: 'keyframe_only',
     prompt: '参考姿态「单人侧身站立」生成一个连贯镜头，保持人物动作与构图'
   })
+  assert.equal(typeof synthId, 'string')
+  assert.equal(polished.style, 'pose-keyframe')
   assert.equal('input' in hit.body, false)
 })
 
@@ -276,4 +289,78 @@ test('#165 旧 meta 无 prompt/mode：重试回退原逻辑，不带这两个字
   assert.equal(payload.input, '/studio/inputs/legacy.mp4')
   assert.equal('prompt' in payload, false)
   assert.equal('mode' in payload, false)
+})
+
+test('#165 keyframe-only 无 brief → 合成 confirmed Brief，payload 带 shots[0].prompt', async () => {
+  const body = poseVideoBody('up-pose-ok01')
+  const before = briefCount()
+  const created = await postJob(body)
+  assert.equal(created.status, 201)
+  assert.equal(briefCount(), before + 1, '只合成 1 个 brief')
+
+  const payload = intakeJobPosts().at(-1)?.body
+  assert.equal(typeof payload.brief_id, 'string')
+  assert.equal(payload.polished.shots[0].prompt, body.prompt)
+  assert.equal(payload.polished.logline, body.prompt)
+  assert.equal(payload.polished.script, body.prompt)
+  assert.equal(payload.polished.style, 'pose-keyframe')
+
+  const meta = JSON.parse(fs.readFileSync(jobMetaFile('pose-video-1'), 'utf8'))
+  assert.equal(meta.synthetic_brief, true)
+  assert.equal(meta.brief_id, payload.brief_id)
+
+  const stored = JSON.parse(
+    fs.readFileSync(path.join(dataRoot, 'studio', 'briefs', `${payload.brief_id}.json`), 'utf8')
+  )
+  assert.equal(stored.status, 'confirmed')
+  assert.equal(stored.version, 1)
+})
+
+test('#165 keyframe-only 有 brief → 不合成', async () => {
+  const polished = {
+    logline: '已有分镜',
+    script: '已有脚本',
+    style: 'pose-keyframe',
+    shots: [{ no: 1, duration_s: 5, prompt: '已有分镜提示词', camera: '固定镜头' }]
+  }
+  const created = await fetch(`${base}/api/studio/briefs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idea: '已有 idea', status: 'confirmed', polished })
+  })
+  assert.equal(created.status, 201)
+  const brief = (await created.json()) as { id: string }
+
+  const before = briefCount()
+  const r = await postJob({ ...poseVideoBody('up-pose-ok01'), brief_id: brief.id })
+  assert.equal(r.status, 201)
+  assert.equal(briefCount(), before, '不应再合成 brief')
+
+  const payload = intakeJobPosts().at(-1)?.body
+  assert.equal(payload.brief_id, brief.id)
+  assert.deepEqual(payload.polished, polished)
+  const meta = JSON.parse(fs.readFileSync(jobMetaFile('pose-video-1'), 'utf8'))
+  assert.equal(meta.brief_id, brief.id)
+  assert.equal('synthetic_brief' in meta, false)
+})
+
+test('#165 重试复用合成 brief，不再新建', async () => {
+  const created = await postJob(poseVideoBody('up-pose-ok01'))
+  assert.equal(created.status, 201)
+  const meta = JSON.parse(fs.readFileSync(jobMetaFile('pose-video-1'), 'utf8'))
+  assert.equal(meta.synthetic_brief, true)
+  const briefId = meta.brief_id as string
+  assert.equal(typeof briefId, 'string')
+
+  const before = briefCount()
+  jobStates['pose-video-1'] = 'failed'
+  const retry = await fetch(`${base}/api/studio/jobs/pose-video-1/retry`, { method: 'POST' })
+  assert.equal(retry.status, 201)
+  assert.equal(briefCount(), before, '重试不应再建 brief')
+
+  const payload = intakeJobPosts().at(-1)?.body
+  assert.equal(payload.brief_id, briefId)
+  const retryMeta = JSON.parse(fs.readFileSync(jobMetaFile('pose-video-1'), 'utf8'))
+  assert.equal(retryMeta.brief_id, briefId)
+  assert.equal(retryMeta.synthetic_brief, true)
 })

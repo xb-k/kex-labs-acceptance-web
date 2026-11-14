@@ -150,6 +150,8 @@ interface JobMeta {
   /** #165: keyframe-only prompt (pose label + scene), kept for retry/trace. */
   prompt?: string | null
   mode?: 'keyframe_only' | null
+  /** #165: set when the Brief was synthesized from `prompt` by this server. */
+  synthetic_brief?: boolean
 }
 
 /** Everything this module needs from api.ts (avoids a circular import). */
@@ -429,6 +431,42 @@ function readBrief(ctx: StudioContext, id: string): Brief | null {
   // #87: briefs written before this field existed are normalised on read so
   // GET/confirm never have to special-case `undefined`.
   if (!Array.isArray(brief.questions_pending)) brief.questions_pending = []
+  return brief
+}
+
+function clipText(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text
+}
+
+/**
+ * #165: a keyframe-only job may carry its prompt on the request body instead of
+ * a Brief. Intake A-stage still requires `brief.polished.shots[].prompt`, so we
+ * materialise a confirmed one-shot Brief from that prompt (same storage as any
+ * other Brief, no extra directories).
+ */
+function synthesizeKeyframeBrief(ctx: StudioContext, prompt: string): Brief {
+  const stamp = nowIso()
+  const brief: Brief = {
+    id: newBriefId(),
+    idea: clipText(prompt, 2000),
+    audience: null,
+    duration_s: 5,
+    aspect: null,
+    tone: null,
+    references: [],
+    polished: {
+      logline: clipText(prompt, 300),
+      script: clipText(prompt, 4000),
+      style: 'pose-keyframe',
+      shots: [{ no: 1, duration_s: 5, prompt: clipText(prompt, 500), camera: '固定镜头' }]
+    },
+    questions_pending: [],
+    status: 'confirmed',
+    version: 1,
+    created_at: stamp,
+    updated_at: stamp
+  }
+  ctx.atomicWriteJson(briefPath(ctx, brief.id), brief)
   return brief
 }
 
@@ -1381,6 +1419,8 @@ type CreateJobInput = {
   /** #165: keyframe-only prompt (pose label + scene). */
   prompt?: string
   mode?: 'keyframe_only'
+  /** #165: retry carries the marker so the synthesized Brief is reused. */
+  synthetic_brief?: boolean
 }
 
 /** #165: staged studio paths are server-side, but never accept traversal. */
@@ -1670,17 +1710,41 @@ async function submitJob(
     if (job.mode) payload.mode = job.mode
     if (job.prompt) payload.prompt = job.prompt
   }
+  // #165: keyframe-only requests may supply the prompt directly instead of a
+  // Brief. Intake A-stage reads prompts from `brief.polished.shots[]`, so build
+  // a confirmed one-shot Brief here and forward it like any other.
+  let briefId = job.brief_id
+  let syntheticBrief = job.synthetic_brief === true
+  if (job.mode === 'keyframe_only' && !briefId) {
+    if (!job.prompt) {
+      ctx.sendJson(res, 400, { error: 'prompt: keyframe_only 任务需提供 prompt 或 brief_id' })
+      return
+    }
+    briefId = synthesizeKeyframeBrief(ctx, job.prompt).id
+    syntheticBrief = true
+  }
   // #98 I1: forward the confirmed Brief so intake can persist jobs/<job>/brief.json
-  // and stage A can consume logline/script/shot prompts. Without brief_id the
-  // payload stays byte-for-byte identical to the pre-#98 behaviour.
-  if (job.brief_id) {
-    const brief = readBrief(ctx, job.brief_id)
+  // and stage A can consume logline/script/shot prompts.
+  if (briefId) {
+    const brief = readBrief(ctx, briefId)
     if (!brief) {
+      if (syntheticBrief) {
+        ctx.sendJson(res, 500, { error: 'synthetic_brief_invalid', path: '' })
+        return
+      }
       ctx.sendJson(res, 409, { error: 'brief_polished_invalid', path: '' })
       return
     }
     const checked = validatePolished(brief.polished)
     if (!checked.ok) {
+      if (syntheticBrief) {
+        ctx.sendJson(res, 500, {
+          error: 'synthetic_brief_invalid',
+          path: checked.path,
+          reason: checked.reason
+        })
+        return
+      }
       ctx.sendJson(res, 409, {
         error: 'brief_polished_invalid',
         path: checked.path,
@@ -1688,7 +1752,7 @@ async function submitJob(
       })
       return
     }
-    payload.brief_id = job.brief_id
+    payload.brief_id = briefId
     payload.polished = brief.polished
   }
   const upstream = await callIntake(ctx, 'POST', '/intake/jobs', payload)
@@ -1723,7 +1787,7 @@ async function submitJob(
     id,
     type: job.type,
     rail: job.rail,
-    brief_id: job.brief_id,
+    brief_id: briefId,
     model: job.model,
     input: job.input ?? null,
     created_at: nowIso(),
@@ -1733,7 +1797,8 @@ async function submitJob(
     keyframe_asset: job.keyframe_asset ?? null,
     // #165: keep the keyframe-only prompt/mode so retry and trace can reuse them.
     prompt: job.prompt ?? null,
-    mode: job.mode ?? null
+    mode: job.mode ?? null,
+    ...(syntheticBrief ? { synthetic_brief: true } : {})
   })
   const detail = await callIntake(ctx, 'GET', `/intake/jobs/${encodeURIComponent(id)}`)
   const detailBody = detail.ok && detail.status === 200 ? detail.body : { state: 'queued', updated_at: nowIso() }
@@ -2152,7 +2217,8 @@ async function retryJob(ctx: StudioContext, req: IncomingMessage, res: ServerRes
       keyframe_asset: meta.keyframe_asset ?? undefined,
       // #165: old metas lack these fields; `?? undefined` keeps them off the payload.
       prompt: meta.prompt ?? undefined,
-      mode: meta.mode ?? undefined
+      mode: meta.mode ?? undefined,
+      synthetic_brief: meta.synthetic_brief ?? undefined
     },
     upload
   )
