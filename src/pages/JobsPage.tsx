@@ -50,41 +50,102 @@ const STUDIO_STATUS_RANK: Record<StudioJobStatus, number> = {
   canceled: 4
 }
 
+function studioArtifactUrl(id: string, name: string): string {
+  return `/api/studio/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}`
+}
+
+/** #159: 视频缩略取帧位置；未知时长按 0.4s，极短片取一半避免越界。 */
+export function studioVideoPreviewSeek(duration: number): number {
+  if (!Number.isFinite(duration) || duration <= 0) return 0.4
+  return Math.min(0.4, duration / 2)
+}
+
+/** #159: 行缩略类型；媒体加载失败（onError）时一律退回图标，不显示破图。 */
+export function studioJobThumbKind(
+  job: StudioJobSummary,
+  mediaFailed: boolean
+): 'video' | 'image' | 'icon' {
+  if (job.status !== 'succeeded' || mediaFailed) return 'icon'
+  return job.type === 'image' ? 'image' : 'video'
+}
+
+/** #159: /jobs 工坊行左侧真实缩略（失败/未完成任务用图标占位）。 */
+function StudioJobThumb({ job }: { job: StudioJobSummary }) {
+  const [mediaFailed, setMediaFailed] = useState(false)
+  const kind = studioJobThumbKind(job, mediaFailed)
+  return (
+    <span
+      data-testid={`studio-job-thumb-${job.id}`}
+      data-thumb-kind={kind}
+      className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-black/[0.06] text-apple-subtext sm:h-16 sm:w-16"
+    >
+      {kind === 'video' && (
+        <video
+          src={studioArtifactUrl(job.id, 'final.mp4')}
+          className="h-full w-full object-cover"
+          muted
+          playsInline
+          preload="metadata"
+          aria-hidden="true"
+          onLoadedMetadata={(event) => {
+            const video = event.currentTarget
+            video.currentTime = studioVideoPreviewSeek(video.duration)
+          }}
+          onError={() => setMediaFailed(true)}
+        />
+      )}
+      {kind === 'image' && (
+        <img
+          src={studioArtifactUrl(job.id, 'image-01.png')}
+          alt=""
+          loading="lazy"
+          className="h-full w-full object-cover"
+          onError={() => setMediaFailed(true)}
+        />
+      )}
+      {kind === 'icon' && <Film className="h-6 w-6" aria-hidden="true" />}
+    </span>
+  )
+}
+
 /** #154: /jobs 工坊任务行主体（不含 Link 外壳），导出以便 SSR 断言耗时展示。 */
 export function StudioJobRowContent({ job }: { job: StudioJobSummary }) {
   return (
-    <div className="min-w-0 flex-1">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span
-          className="min-w-0 flex-1 truncate text-[13px] font-medium"
-          title={`${jobReadable(job)}（任务 ID ${job.id}）`}
-        >
-          {jobReadable(job)}
-        </span>
-        <span className="shrink-0 text-[11px] font-medium text-apple-blueInk">{job.rail} 轨</span>
-        <span data-testid={`snapshot-status-${job.id}`} data-snapshot-status={job.status}>
-          <StudioStatusChip status={job.status} />
-        </span>
+    <div className="flex min-w-0 flex-1 items-center gap-3">
+      <StudioJobThumb job={job} />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span
+            className="min-w-0 flex-1 truncate text-[13px] font-medium"
+            title={`${jobReadable(job)}（任务 ID ${job.id}）`}
+          >
+            {jobReadable(job)}
+          </span>
+          <span className="shrink-0 text-[11px] font-medium text-apple-blueInk">{job.rail} 轨</span>
+          <span data-testid={`snapshot-status-${job.id}`} data-snapshot-status={job.status}>
+            <StudioStatusChip status={job.status} />
+          </span>
+        </div>
+        <p className="mt-1 break-words text-[11px] leading-relaxed text-apple-subtext">
+          <span className="num" title={job.id} data-job-id={job.id}>
+            {jobIdDisplay(job.id)}
+          </span>{' '}
+          · {formatStamp(job.created_at)} · Brief <span className="num">{job.brief_id ?? '—'}</span>
+          {' · '}
+          <span
+            data-testid={`snapshot-stage-${job.id}`}
+            data-snapshot-stage={job.stage ?? ''}
+            title={job.stage ? `阶段 ${job.stage}` : '阶段不可用：studio 未返回 stage'}
+          >
+            {job.stage ? `阶段 ${job.stage}` : '阶段 —'}
+          </span>
+          {' · '}
+          <span className="num" data-testid={`studio-job-duration-${job.id}`}>
+            {formatJobDuration(job.duration_ms)}
+          </span>
+          {job.error ? ` · ${job.error}` : ''}
+        </p>
       </div>
-      <p className="mt-1 break-words text-[11px] leading-relaxed text-apple-subtext">
-        <span className="num" title={job.id} data-job-id={job.id}>
-          {jobIdDisplay(job.id)}
-        </span>{' '}
-        · {formatStamp(job.created_at)} · Brief <span className="num">{job.brief_id ?? '—'}</span>
-        {' · '}
-        <span
-          data-testid={`snapshot-stage-${job.id}`}
-          data-snapshot-stage={job.stage ?? ''}
-          title={job.stage ? `阶段 ${job.stage}` : '阶段不可用：studio 未返回 stage'}
-        >
-          {job.stage ? `阶段 ${job.stage}` : '阶段 —'}
-        </span>
-        {' · '}
-        <span className="num" data-testid={`studio-job-duration-${job.id}`}>
-          {formatJobDuration(job.duration_ms)}
-        </span>
-        {job.error ? ` · ${job.error}` : ''}
-      </p>
     </div>
   )
 }
