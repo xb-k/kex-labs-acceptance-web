@@ -76,6 +76,14 @@ import {
   type RiskTask
 } from './risk-decisions'
 import { buildSnapshot, bTrackProjection, isSafeJobId, judgeRule, policyRules } from './snapshot'
+import {
+  deleteMedia,
+  deleteMediaJob,
+  jobMeta,
+  listMediaJobs,
+  mediaJobExists,
+  resolveMedia
+} from './media-store'
 
 const DATA_ROOT = process.env.WEB_DATA_ROOT
   ? path.resolve(process.env.WEB_DATA_ROOT)
@@ -1671,7 +1679,49 @@ export async function deliveriesData(limit?: number) {
   const out = rows
     .filter((row): row is NonNullable<typeof row> => row !== null)
     .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
-  return { source, deliveries: limit ? out.slice(0, limit) : out }
+
+  // NAS `media/jobs/*` videos become deliveries too. b-track rows win on a
+  // duplicate job id; media rows carry no probe data (duration/size unknown).
+  const seenJobs = new Set(out.map((row) => row.jobId))
+  const metaCache = new Map<string, any>()
+  const mediaRows: typeof out = []
+  for (const item of listMediaJobs({ dataRoot: DATA_ROOT })) {
+    if (item.kind !== 'video') continue
+    if (seenJobs.has(item.job_id)) continue
+    seenJobs.add(item.job_id)
+    let meta = metaCache.get(item.job_id)
+    if (meta === undefined) {
+      meta = jobMeta(item.job_id, { dataRoot: DATA_ROOT, readJson })
+      metaCache.set(item.job_id, meta)
+    }
+    mediaRows.push({
+      jobId: item.job_id,
+      title: mediaDeliveryTitle(meta, item.name),
+      durationS: null,
+      width: null,
+      height: null,
+      mp4: item.url,
+      poster: null,
+      coverUrl: null,
+      report: null,
+      score: null,
+      gate: '已发布',
+      createdAt: item.mtime,
+      bytes: item.size,
+      repair: null
+    })
+  }
+  const merged = [...out, ...mediaRows].sort((a, b) =>
+    String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? ''))
+  )
+  return { source, deliveries: limit ? merged.slice(0, limit) : merged }
+}
+
+function mediaDeliveryTitle(meta: any, fallback: string): string {
+  const bits = [meta?.brief_id, meta?.type, meta?.rail].filter(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0
+  )
+  return bits.length ? bits.join(' · ') : fallback
 }
 
 // ---------------------------------------------------------------------------
@@ -3544,10 +3594,14 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
 const MEDIA_TYPES: Record<string, string> = {
   '.mp4': 'video/mp4',
   '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp'
+  '.webp': 'image/webp',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4'
 }
 
 function serveMedia(req: IncomingMessage, res: ServerResponse, filePath: string) {
@@ -4233,6 +4287,118 @@ async function handleTaskReconcile(req: IncomingMessage, url: URL, res: ServerRe
   }
 }
 
+export type MediaRouteDeps = {
+  dataRoot?: string
+  env?: NodeJS.ProcessEnv
+}
+
+const MEDIA_JOB_FILE_RE = /^\/api\/media\/jobs\/([^/]+)\/([^/]+)$/
+
+function mediaCount(raw: string | null, fallback: number, max: number): number | null {
+  if (raw === null || raw === '') return fallback
+  if (!/^\d+$/.test(raw)) return null
+  return Math.min(Number(raw), max)
+}
+
+/**
+ * NAS media routes (#160):
+ *  - `GET/HEAD /api/media/jobs?limit&offset` → published files (newest first);
+ *  - `GET/HEAD /api/media/jobs/:job/:name` → local file with Range;
+ *  - `DELETE /api/media/jobs/:job/:name` → physical unlink + audit.
+ * Exported with injectable `dataRoot`/`env` so contract tests drive this exact
+ * code path against a temp directory.
+ */
+export function handleMediaRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  pathname: string,
+  deps: MediaRouteDeps = {}
+): boolean {
+  const dataRoot = deps.dataRoot ?? DATA_ROOT
+  const env = deps.env ?? process.env
+
+  if (pathname === '/api/media/jobs') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.statusCode = 405
+      res.setHeader('Allow', 'GET, HEAD')
+      res.end()
+      return true
+    }
+    const limit = mediaCount(url.searchParams.get('limit'), 200, 1000)
+    const offset = mediaCount(url.searchParams.get('offset'), 0, 1_000_000)
+    if (limit === null || offset === null) {
+      sendJson(res, 400, { error: 'invalid limit/offset' })
+      return true
+    }
+    const all = listMediaJobs({ dataRoot })
+    sendJson(res, 200, {
+      jobs: all.slice(offset, offset + limit),
+      total: all.length,
+      limit,
+      offset
+    })
+    return true
+  }
+
+  const match = pathname.match(MEDIA_JOB_FILE_RE)
+  if (!match) {
+    sendJson(res, 404, { error: 'not found' })
+    return true
+  }
+
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    const resolved = resolveMedia(match[1], match[2], { dataRoot })
+    if (!resolved.ok) {
+      sendJson(res, resolved.status, { error: resolved.error })
+      return true
+    }
+    if (url.searchParams.get('download') === '1') {
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${path.basename(resolved.value.file).replace(/"/g, '')}"`
+      )
+    }
+    serveMedia(req, res, resolved.value.file)
+    return true
+  }
+
+  if (req.method !== 'DELETE') {
+    res.statusCode = 405
+    res.setHeader('Allow', 'GET, HEAD, DELETE')
+    res.end()
+    return true
+  }
+
+  const auth = authorizeTaskWrite(req, env)
+  if (!auth.ok) {
+    sendJson(res, auth.status, { error: auth.error })
+    return true
+  }
+
+  let deleted
+  try {
+    deleted = deleteMedia(match[1], match[2], { dataRoot })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : 'delete failed' })
+    return true
+  }
+  if (!deleted.ok) {
+    sendJson(res, deleted.status, { error: deleted.error })
+    return true
+  }
+  sendJson(res, 200, {
+    ok: true,
+    deleted: true,
+    job_id: deleted.value.job_id,
+    name: deleted.value.name,
+    bytes: deleted.value.bytes,
+    path: deleted.value.path,
+    jobDirRemoved: deleted.value.jobDirRemoved
+  })
+  return true
+}
+
 /**
  * #107 `DELETE /api/deliveries/:id` 的生产实现，抽成可注入 `dataRoot` / `env`
  * 的函数，单测（server/deliveries-delete.test.ts）用临时目录驱动同一条路径。
@@ -4269,6 +4435,34 @@ export function handleDeliveryDelete(
   } catch {
     /* 非法百分号编码 → 交给白名单校验返回 400 */
   }
+
+  // NAS media: `media:<job>` (or a plain id that maps to an existing media job)
+  // is a physical unlink, never a trash move. Legacy issue-19 deliveries keep
+  // the original soft-delete below.
+  const mediaPrefixed = id.startsWith('media:')
+  const mediaJob = mediaPrefixed ? id.slice('media:'.length) : id
+  if (mediaPrefixed || mediaJobExists(mediaJob, { dataRoot })) {
+    let deleted
+    try {
+      deleted = deleteMediaJob(mediaJob, { dataRoot })
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : 'delete failed' })
+      return true
+    }
+    if (!deleted.ok) {
+      sendJson(res, deleted.status, { error: deleted.error })
+      return true
+    }
+    sendJson(res, 200, {
+      ok: true,
+      jobId: mediaJob,
+      deleted: deleted.value.deleted,
+      bytes: deleted.value.bytes,
+      files: deleted.value.files
+    })
+    return true
+  }
+
   let result: TrashResult
   try {
     result = trashDelivery(id, dataRoot)
@@ -4788,6 +4982,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
         }
       }
     })
+    return
+  }
+
+  if (pathname === '/api/media/jobs' || pathname.startsWith('/api/media/jobs/')) {
+    handleMediaRoute(req, res, url, pathname, { dataRoot: DATA_ROOT, env: process.env })
     return
   }
 
