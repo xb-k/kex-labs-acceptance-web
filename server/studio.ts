@@ -56,6 +56,8 @@ export interface Brief {
   updated_at: string
 }
 
+export type JobQcStatus = 'pending' | 'pass' | 'fail' | 'conditional' | 'unknown'
+
 export interface Job {
   id: string
   type: JobType
@@ -67,7 +69,7 @@ export interface Job {
   inputs: Array<{ asset_id: string; role: 'source' }>
   outputs: string[]
   assets: Asset[]
-  qc: { status: 'pending' | 'pass' | 'fail'; report_id: null }
+  qc: { status: JobQcStatus; report_id: null }
   cost: { gpu_seconds: null; credits: null }
   created_by: 'web'
   created_at: string
@@ -951,6 +953,7 @@ function writeJobMeta(ctx: StudioContext, meta: JobMeta) {
 }
 
 export function studioStatus(state: unknown): JobStatus {
+  if (isPlainObject(state)) return studioStatus(state.state)
   if (state === 'succeeded') return 'succeeded'
   if (state === 'running') return 'running'
   if (state === 'failed' || state === 'rejected') return 'failed'
@@ -958,12 +961,52 @@ export function studioStatus(state: unknown): JobStatus {
   return 'queued'
 }
 
-function qcFor(status: JobStatus, error: string | null): Job['qc'] {
-  if (status === 'succeeded') return { status: 'pass', report_id: null }
-  if (status === 'failed' && typeof error === 'string' && /quality/i.test(error)) {
+/**
+ * #164: a succeeded job is not a PASS by itself. The intake detail may carry
+ * the orchestrator state (`quality_gate` + `quality[]`); without it the verdict
+ * must stay UNKNOWN instead of claiming success.
+ */
+function qcStateSource(detailOrState: unknown): Record<string, any> {
+  if (!isPlainObject(detailOrState)) return {}
+  return isPlainObject(detailOrState.state) ? detailOrState.state : detailOrState
+}
+
+function qualityBlocked(quality: unknown[] | null): boolean {
+  return Boolean(
+    quality?.some((item) => isPlainObject(item) && item.status === 'blocked')
+  )
+}
+
+function qualityVerdict(quality: unknown[]): JobQcStatus {
+  const items = quality.filter(isPlainObject)
+  if (items.some((item) => item.status === 'blocked')) return 'conditional'
+  if (items.some((item) => item.status === 'fail')) return 'fail'
+  if (items.length > 0 && items.every((item) => item.status === 'pass')) return 'pass'
+  return 'unknown'
+}
+
+function qcVerdict(source: Record<string, any>, quality: unknown[] | null): JobQcStatus | null {
+  const gate = isPlainObject(source.quality_gate) ? source.quality_gate : null
+  if (gate) {
+    const gateStatus = typeof gate.status === 'string' ? gate.status.toLowerCase() : ''
+    if (gateStatus === 'failed') return 'fail'
+    if (gateStatus === 'blocked') return 'conditional'
+    if (gateStatus === 'ok') return qualityBlocked(quality) ? 'conditional' : 'pass'
+  }
+  if (quality) return qualityVerdict(quality)
+  return null
+}
+
+function qcFor(status: JobStatus, detailOrState?: unknown): Job['qc'] {
+  const source = qcStateSource(detailOrState)
+  const quality = Array.isArray(source.quality) ? source.quality : null
+  const verdict = qcVerdict(source, quality)
+  if (verdict) return { status: verdict, report_id: null }
+  const error = typeof source.error === 'string' ? source.error : null
+  if (status === 'failed' && error && /quality/i.test(error)) {
     return { status: 'fail', report_id: null }
   }
-  return { status: 'pending', report_id: null }
+  return { status: 'unknown', report_id: null }
 }
 
 export type StudioVerdict = 'PASS' | 'FAIL' | 'CONDITIONAL' | 'UNKNOWN'
@@ -975,9 +1018,15 @@ export function studioProjection(detail: any): {
   verdict: StudioVerdict
 } {
   const status = studioStatus(detail?.state)
-  const error = typeof detail?.error === 'string' ? detail.error : null
-  const qc = qcFor(status, error).status
-  const verdict: StudioVerdict = qc === 'pass' ? 'PASS' : qc === 'fail' ? 'FAIL' : 'UNKNOWN'
+  const qc = qcFor(status, detail).status
+  const verdict: StudioVerdict =
+    qc === 'pass'
+      ? 'PASS'
+      : qc === 'fail'
+        ? 'FAIL'
+        : qc === 'conditional'
+          ? 'CONDITIONAL'
+          : 'UNKNOWN'
   return {
     status,
     stage: typeof detail?.stage === 'string' ? detail.stage : null,
@@ -1192,7 +1241,7 @@ export function buildStudioJob(ctx: StudioContext, id: string, detail: any): Job
     inputs: sourceId ? [{ asset_id: sourceId, role: 'source' }] : [],
     outputs,
     assets,
-    qc: qcFor(status, error),
+    qc: qcFor(status, detail),
     cost: { gpu_seconds: null, credits: null },
     created_by: 'web',
     created_at: createdAt,

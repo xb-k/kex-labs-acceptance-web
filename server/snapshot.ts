@@ -127,9 +127,12 @@ export function bTrackProjection(summaryVerdict: unknown, listVerdict: unknown):
 }
 
 /** Contract §2: studio qc status -> snapshot verdict. */
-export function studioVerdictFromQc(qc: 'pass' | 'fail' | 'pending'): SnapshotVerdict {
+export function studioVerdictFromQc(
+  qc: 'pass' | 'fail' | 'pending' | 'conditional' | 'unknown'
+): SnapshotVerdict {
   if (qc === 'pass') return 'PASS'
   if (qc === 'fail') return 'FAIL'
+  if (qc === 'conditional') return 'CONDITIONAL'
   return 'UNKNOWN'
 }
 

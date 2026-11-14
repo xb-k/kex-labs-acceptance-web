@@ -1009,7 +1009,7 @@ export type StudioJob = StudioJobSummary & {
   inputs: Array<{ asset_id: string; role: string }>
   outputs: string[]
   assets: StudioAsset[]
-  qc: { status: 'pending' | 'pass' | 'fail'; report_id: null }
+  qc: { status: 'pending' | 'pass' | 'fail' | 'conditional' | 'unknown'; report_id: null }
   cost: { gpu_seconds: number | null; credits: number | null }
   created_by: 'web'
   events: Array<{ ts: string; type: string; message: string }>

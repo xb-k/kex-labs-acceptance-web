@@ -84,9 +84,39 @@ test('I2 studio list/snapshot share studioProjection', () => {
     state_stages: { A: { status: 'done' } }
   }
   const projected = studioProjection(detail)
-  assert.deepEqual(projected, { status: 'succeeded', stage: 'C', verdict: 'PASS' })
+  assert.deepEqual(projected, { status: 'succeeded', stage: 'C', verdict: 'UNKNOWN' })
   const failed = studioProjection({ state: 'failed', error: 'quality gate failed', stage: 'D' })
   assert.deepEqual(failed, { status: 'failed', stage: 'D', verdict: 'FAIL' })
+})
+
+test('I2b qcFor reads quality_gate/quality and never turns succeeded into PASS alone', () => {
+  const base = (extra: Record<string, unknown>) => ({
+    state: 'succeeded',
+    stage: 'C',
+    error: null,
+    ...extra
+  })
+  const blocked = studioProjection(
+    base({ quality_gate: { status: 'blocked', failed: [], blocked: ['B1'], error: 'missing probe' } })
+  )
+  assert.equal(blocked.verdict, 'CONDITIONAL')
+  assert.equal(blocked.status, 'succeeded')
+
+  const failed = studioProjection(
+    base({ quality_gate: { status: 'failed', failed: ['B1_ssim'], blocked: [], error: null } })
+  )
+  assert.equal(failed.verdict, 'FAIL')
+
+  const passed = studioProjection(
+    base({
+      quality_gate: { status: 'ok', failed: [], blocked: [], error: null },
+      quality: [{ name: 'B1_ssim', status: 'pass', pass: true, value: 0.91 }]
+    })
+  )
+  assert.equal(passed.verdict, 'PASS')
+
+  const unknown = studioProjection(base({}))
+  assert.equal(unknown.verdict, 'UNKNOWN')
 })
 
 test('I3 four unavailable reasons all return the explicit null shape', () => {

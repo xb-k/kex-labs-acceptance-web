@@ -8,7 +8,9 @@ import { StudioMediaAssets, type MediaJobsState } from './StudioMediaAssets'
 const QC: Record<StudioJob['qc']['status'], { label: string; className: string }> = {
   pending: { label: '待判定', className: 'bg-[#F0F0F2] text-apple-subtextAlt ring-[#E2E2E6]' },
   pass: { label: '通过', className: 'bg-[#EAF8EE] text-[#1E7A3C] ring-[#CDEED6]' },
-  fail: { label: '未通过', className: 'bg-[#FCEDEB] text-[#B3261E] ring-[#F3D3CF]' }
+  fail: { label: '未通过', className: 'bg-[#FCEDEB] text-[#B3261E] ring-[#F3D3CF]' },
+  conditional: { label: '数据不足', className: 'bg-[#FFF4E5] text-[#9A5B00] ring-[#F2D9B0]' },
+  unknown: { label: '未判定', className: 'bg-[#F0F0F2] text-apple-subtextAlt ring-[#E2E2E6]' }
 }
 
 const KIND_LABEL: Record<StudioAsset['kind'], string> = {
