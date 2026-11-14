@@ -28,6 +28,12 @@ import {
   Sliders
 } from '../components/icons'
 import { formatClockMs, formatGb } from '../format'
+import {
+  MEDIA_JOBS_TRACKER_URL,
+  mediaItemsOf,
+  resolveStageArtifacts,
+  type MediaJobsResponse
+} from '../media-jobs'
 import { Link } from '../router'
 import { ToastHost } from '../components/ui'
 import { formatTime } from '../components/flow/flow-utils'
@@ -86,11 +92,13 @@ export function ProductionTrackerPage() {
   const status = useLiveJson<StatusResponse>('/api/status', metaPoll)
   const deliveriesRes = useLiveJson<DeliveriesResponse>('/api/deliveries', metaPoll)
   const studioJobsRes = useLiveJson<StudioJobsResponse>('/api/studio/jobs?limit=50', metaPoll)
+  const mediaRes = useLiveJson<MediaJobsResponse>(MEDIA_JOBS_TRACKER_URL, metaPoll)
   const system = useSystem(liveSync ? 10000 : 0)
   const { toast, showToast, clearToast } = useToast(3400)
 
   const jobs = flow.data?.jobs ?? []
   const job = flow.data?.job ?? null
+  const mediaItems = useMemo(() => mediaItemsOf(mediaRes.data), [mediaRes.data])
 
   // #122：/api/studio/briefs 已按 updated_at 倒序，直接取最近更新的 Brief；
   // 不再按 job id 特判残留 mock brief（brief_coffee_ad_001 / brief_vlog_cafe_002）。
@@ -143,8 +151,10 @@ export function ProductionTrackerPage() {
   const activeNodeArtifacts = useMemo(() => {
     if (!job) return []
     const stageKey = effectiveStageKey === 'B2' ? 'B' : effectiveStageKey === 'SCRIPT' ? 'C' : effectiveStageKey
-    return job.stages.find((s) => s.key === stageKey)?.artifacts ?? []
-  }, [job, effectiveStageKey])
+    const stateArtifacts = job.stages.find((s) => s.key === stageKey)?.artifacts
+    // #160：state 为空时回退到该 job 的 NAS 成片；D/E/F 才允许复用，不伪造早期节点产物。
+    return resolveStageArtifacts(stateArtifacts, mediaItems, job.id, effectiveStageKey)
+  }, [job, effectiveStageKey, mediaItems])
 
   const effectiveShotId = useMemo(() => {
     if (storyboard.some((s) => s.shotId === selectedShotId)) return selectedShotId

@@ -132,11 +132,14 @@ export function StageNodeTrack({
               <>
                 <div className="text-[11px] font-medium text-apple-subtext">本节点真实输出产物（/media/kex）</div>
                 {stageArtifacts.length > 0 ? (
-                  <div className="mt-2 grid grid-cols-2 gap-2.5">
-                    {stageArtifacts.slice(0, 2).map((art) => (
+                  <div
+                    data-testid="stage-node-artifacts"
+                    className="mt-2 flex gap-2.5 overflow-x-auto pb-1"
+                  >
+                    {stageArtifacts.map((art) => (
                       <div
                         key={art.path}
-                        className="overflow-hidden rounded-[10px] border border-black/[0.08] bg-[#121316]"
+                        className="w-56 shrink-0 overflow-hidden rounded-[10px] border border-black/[0.08] bg-[#121316]"
                       >
                         {art.url && art.kind === 'image' ? (
                           <img
@@ -147,9 +150,9 @@ export function StageNodeTrack({
                           />
                         ) : art.url && art.kind === 'video' ? (
                           <video
+                            data-testid="stage-node-video"
                             src={art.url}
                             controls
-                            muted
                             playsInline
                             preload="metadata"
                             className="h-24 w-full object-cover"
@@ -169,10 +172,13 @@ export function StageNodeTrack({
                     ))}
                   </div>
                 ) : (
-                  <div className="mt-2 flex h-24 items-center justify-center rounded-[10px] border border-dashed border-black/[0.12] bg-white px-4 text-center text-[12px] text-apple-subtext">
+                  <div
+                    data-testid="stage-node-artifacts-empty"
+                    className="mt-2 flex h-24 items-center justify-center rounded-[10px] border border-dashed border-black/[0.12] bg-white px-4 text-center text-[12px] text-apple-subtext"
+                  >
                     {activeNode.status === 'pending'
                       ? '该节点正在排队等待上一阶段释放模型内存锁'
-                      : '该节点为规则映射/元数据检查点，输出已写入 state.json 与 decision log'}
+                      : '本节点暂无真实产物'}
                   </div>
                 )}
               </>

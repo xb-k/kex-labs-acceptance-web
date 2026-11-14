@@ -6,6 +6,8 @@
  * 形态，避免契约文档（`items`）与实现（`jobs`）漂移时前端整体空白。
  */
 
+import type { FlowArtifact } from './types'
+
 export type MediaJobKind = 'video' | 'image' | 'audio'
 
 export type MediaJobItem = {
@@ -29,6 +31,15 @@ export type MediaJobsResponse = {
 
 /** 详情/工坊列表统一取 100 条（NAS 现有媒体远小于该量级）。 */
 export const MEDIA_JOBS_URL = '/api/media/jobs?limit=100'
+
+/** 生产总台按任务过滤 NAS 成片（#160）：单次取 200 条覆盖现有归档量。 */
+export const MEDIA_JOBS_TRACKER_URL = '/api/media/jobs?limit=200'
+
+/** NAS 产物在阶段节点里的统一 label；不区分具体阶段，避免伪造。 */
+export const NAS_ARTIFACT_LABEL = 'NAS 成片/图片'
+
+/** 成片只可能在 D/E/F 出现；早期节点（抽帧/重绘）不冒领 NAS 成片。 */
+const NAS_ARTIFACT_STAGE_KEYS = new Set(['D', 'E', 'F'])
 
 /** 永久删除 NAS 文件的确认文案（交付页 / 工坊详情 / 单测共用）。 */
 export const MEDIA_DELETE_CONFIRM = '永久删除 NAS 文件，不可恢复'
@@ -94,4 +105,40 @@ export function mediaDeleteUrl(item: MediaJobItem): string {
 /** 交付页 media 行判定：合并后的 NAS 视频 `mp4` 指向 `/api/media/jobs/...`。 */
 export function isMediaDeliveryUrl(mp4: string | null | undefined): boolean {
   return typeof mp4 === 'string' && mp4.startsWith('/api/media/jobs/')
+}
+
+/**
+ * 把某个任务的 NAS 媒体映射成阶段节点产物（#160）。
+ * - 只允许 D/E/F 复用：F 展示 final.mp4（及同任务图片），D/E 只复用视频；
+ * - 早期节点没有对应 NAS 文件，返回空数组，不把成片挪到错误阶段。
+ */
+export function nasArtifactsForNode(
+  items: MediaJobItem[],
+  jobId: string | null | undefined,
+  nodeKey: string | null | undefined
+): FlowArtifact[] {
+  if (!jobId || !nodeKey || !NAS_ARTIFACT_STAGE_KEYS.has(nodeKey)) return []
+  const media = mediaForJob(items, jobId).filter((item) => nodeKey === 'F' || item.kind === 'video')
+  return media.map((item) => ({
+    path: `media/jobs/${item.job_id}/${item.name}`,
+    exists: true,
+    kind: item.kind,
+    label: NAS_ARTIFACT_LABEL,
+    rel: null,
+    url: item.url
+  }))
+}
+
+/**
+ * 阶段节点产物解析：state.json 记录了真实产物就原样优先；
+ * 只有 state 为空时才回退到该任务的 NAS 媒体，两者不混合、不伪造。
+ */
+export function resolveStageArtifacts(
+  stateArtifacts: FlowArtifact[] | null | undefined,
+  mediaItems: MediaJobItem[],
+  jobId: string | null | undefined,
+  nodeKey: string | null | undefined
+): FlowArtifact[] {
+  if (stateArtifacts && stateArtifacts.length > 0) return stateArtifacts
+  return nasArtifactsForNode(mediaItems, jobId, nodeKey)
 }
