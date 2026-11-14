@@ -609,7 +609,11 @@ function buildJob(root: string, id: string, state: any, warnings: Warn) {
   }
 }
 
-export async function flowData(url: URL): Promise<{ status: number; body: any }> {
+/** #163: `hiddenJobIds` are tombstoned jobs — never listed, never resolved. */
+export async function flowData(
+  url: URL,
+  hiddenJobIds: ReadonlySet<string> = new Set()
+): Promise<{ status: number; body: any }> {
   const root = kexRoot()
   if (!root) {
     return { status: 200, body: { available: false, reason: 'kex repo not configured' } }
@@ -618,10 +622,14 @@ export async function flowData(url: URL): Promise<{ status: number; body: any }>
   const warnings: Warn = []
   // #job-status: state.status wins; intake is only a fallback for jobs whose
   // state file predates the status field. Delivery presence is never consulted.
-  const jobs = listJobs(root, await fetchIntakeStatusMap())
+  const jobs = listJobs(root, await fetchIntakeStatusMap()).filter((job) => !hiddenJobIds.has(job.id))
   const meta = { root, generated_at: new Date().toISOString(), warnings }
   const logs = readLogs(root, warnings)
   const requested = (url.searchParams.get('job') ?? '').trim()
+
+  if (requested && hiddenJobIds.has(requested)) {
+    return { status: 404, body: { error: 'job not found' } }
+  }
 
   if (requested === 'b-track-s1') {
     return {

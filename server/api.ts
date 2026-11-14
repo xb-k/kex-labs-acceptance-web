@@ -85,6 +85,7 @@ import {
   mediaJobExists,
   resolveMedia
 } from './media-store'
+import { appendTombstoneAudit, isTombstoned, readTombstones, tombstone } from './tombstones'
 
 const DATA_ROOT = process.env.WEB_DATA_ROOT
   ? path.resolve(process.env.WEB_DATA_ROOT)
@@ -1679,8 +1680,11 @@ export async function deliveriesData(limit?: number) {
         repair
       }
     })
+  // #163: tombstoned jobs are deleted system-wide — no b-track or media row.
+  const hiddenJobs = new Set(readTombstones({ dataRoot: DATA_ROOT }).map((entry) => entry.job_id))
   const out = rows
     .filter((row): row is NonNullable<typeof row> => row !== null)
+    .filter((row) => !hiddenJobs.has(row.jobId))
     .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
 
   // NAS `media/jobs/*` videos and images become deliveries too. b-track rows
@@ -1691,6 +1695,7 @@ export async function deliveriesData(limit?: number) {
   const mediaRows: typeof out = []
   for (const item of listMediaJobs({ dataRoot: DATA_ROOT })) {
     if (item.kind !== 'video' && item.kind !== 'image') continue
+    if (hiddenJobs.has(item.job_id)) continue
     if (seenJobs.has(item.job_id)) continue
     seenJobs.add(item.job_id)
     let meta = metaCache.get(item.job_id)
@@ -4394,6 +4399,12 @@ export function handleMediaRoute(
     sendJson(res, deleted.status, { error: deleted.error })
     return true
   }
+  // #163: the job dir only disappears once the last file is gone → hide the job.
+  if (deleted.value.jobDirRemoved) {
+    const files = [deleted.value.path]
+    tombstone(deleted.value.job_id, 'media', files, { dataRoot })
+    appendTombstoneAudit(dataRoot, { job: deleted.value.job_id, source: 'media', files })
+  }
   sendJson(res, 200, {
     ok: true,
     deleted: true,
@@ -4457,9 +4468,17 @@ export function handleDeliveryDelete(
       return true
     }
     if (!deleted.ok) {
+      // #163: deleting an already-tombstoned media job is an idempotent no-op.
+      if (deleted.status === 404 && isTombstoned(mediaJob, { dataRoot })) {
+        sendJson(res, 200, { ok: true, jobId: mediaJob, deleted: 0, bytes: 0, files: [] })
+        return true
+      }
       sendJson(res, deleted.status, { error: deleted.error })
       return true
     }
+    const files = deleted.value.files.map((name) => path.posix.join('media', 'jobs', mediaJob, name))
+    tombstone(mediaJob, 'delivery', files, { dataRoot })
+    appendTombstoneAudit(dataRoot, { job: mediaJob, source: 'delivery', files })
     sendJson(res, 200, {
       ok: true,
       jobId: mediaJob,
@@ -4747,7 +4766,9 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
   }
 
   if (pathname === '/api/flow') {
-    const result = await flowData(url)
+    // #163: tombstoned jobs never appear in the flow job list (nor resolve).
+    const hiddenJobs = new Set(readTombstones({ dataRoot: DATA_ROOT }).map((entry) => entry.job_id))
+    const result = await flowData(url, hiddenJobs)
     sendJson(res, result.status, result.body)
     return
   }
@@ -4777,6 +4798,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
     }
     if (!isSafeJobId(job)) {
       sendJson(res, 400, { error: 'invalid job id' })
+      return
+    }
+    // #163: a tombstoned job is gone from every source, snapshot included.
+    if (isTombstoned(job, { dataRoot: DATA_ROOT })) {
+      sendJson(res, 404, { error: 'job not found' })
       return
     }
     sendJson(res, 200, await buildSnapshot({ source, jobId: job }))

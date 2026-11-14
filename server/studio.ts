@@ -16,6 +16,7 @@ import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { contentTypeFor, serveStream } from './media'
 import { listMediaJobs } from './media-store'
+import { appendTombstoneAudit, isTombstoned, tombstone } from './tombstones'
 import { ollamaFetch } from './ollama'
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
@@ -1770,7 +1771,10 @@ async function listJobs(ctx: StudioContext, url: URL, res: ServerResponse) {
     return
   }
   const items = Array.isArray(upstream.body?.items) ? upstream.body.items : []
-  const summaries = items.map((item: any) => buildSummary(ctx, item))
+  const summaries = items
+    .map((item: any) => buildSummary(ctx, item))
+    // #163: deleted jobs stay hidden even while the intake still lists them.
+    .filter((summary: JobSummary) => !isTombstoned(summary.id, { dataRoot: ctx.dataRoot }))
   ctx.sendJson(res, 200, { items: summaries, count: summaries.length, source: 'studio' })
 }
 
@@ -1926,6 +1930,11 @@ async function fillProxySizes(ctx: StudioContext, job: Job): Promise<void> {
 async function jobDetail(ctx: StudioContext, res: ServerResponse, id: string) {
   if (!requireIntakeToken(ctx, res)) return
   if (!JOB_NAME_RE.test(id)) {
+    ctx.sendJson(res, 404, { error: 'job not found' })
+    return
+  }
+  // #163: a tombstoned job resolves to 404 even if the intake still has it.
+  if (isTombstoned(id, { dataRoot: ctx.dataRoot })) {
     ctx.sendJson(res, 404, { error: 'job not found' })
     return
   }
@@ -2178,6 +2187,11 @@ async function deleteJob(
     ctx.sendJson(res, 409, { error: 'delete requires a failed or canceled job', status })
     return
   }
+
+  // #163: hide first, remove second — the job stays invisible even if the
+  // local delete fails (the studio source is the manual-recovery copy).
+  const tombstoned = tombstone(id, 'job', [], { dataRoot: ctx.dataRoot })
+  appendTombstoneAudit(ctx.dataRoot, { job: id, source: 'job', files: tombstoned?.files ?? [] })
 
   const removed = removeJobFiles(ctx, id)
   if (!removed.ok) {
@@ -2543,8 +2557,10 @@ async function imageGallery(ctx: StudioContext, url: URL, res: ServerResponse) {
     candidates.push({ id, meta, listed: false })
   }
 
+  // #163: tombstoned jobs must not reach the gallery (NAS-only candidates too).
+  const visible = candidates.filter((entry) => !isTombstoned(entry.id, { dataRoot: ctx.dataRoot }))
   const items = await Promise.all(
-    candidates.slice(0, limit).map(async ({ id, meta, listed }) => {
+    visible.slice(0, limit).map(async ({ id, meta, listed }) => {
       const detail = await callIntake(ctx, 'GET', `/intake/jobs/${encodeURIComponent(id)}`)
       const body =
         detail.ok && detail.status === 200
