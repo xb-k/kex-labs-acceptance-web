@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react'
 import { formatSizeBytes, formatStamp } from '../../format'
 import { formatJobDuration } from '../../image-workbench'
+import { mediaForJob } from '../../media-jobs'
 import type { StudioAsset, StudioBrief, StudioJob, StudioJobSummary } from '../../types'
+import { StudioMediaAssets, type MediaJobsState } from './StudioMediaAssets'
 
 const QC: Record<StudioJob['qc']['status'], { label: string; className: string }> = {
   pending: { label: '待判定', className: 'bg-[#F0F0F2] text-apple-subtextAlt ring-[#E2E2E6]' },
@@ -53,7 +55,8 @@ export function StudioJobDetail({
   brief,
   loading,
   error,
-  onRetry
+  onRetry,
+  media
 }: {
   job: StudioJobSummary
   detail: StudioJob | null
@@ -61,6 +64,8 @@ export function StudioJobDetail({
   loading: boolean
   error: string | null
   onRetry: () => void
+  /** #160: 抽屉级一次拉取的 NAS 媒体；详情只按当前 job 过滤展示。 */
+  media?: MediaJobsState
 }) {
   const sourceAsset = detail?.assets.find((asset) => asset.id === `asset_${job.id}_source`) ?? null
   const otherAssets = detail?.assets.filter((asset) => asset.id !== `asset_${job.id}_source`) ?? []
@@ -237,6 +242,9 @@ export function StudioJobDetail({
                       : asset.uri.replace(/^studio:\/\//, '')
                     return (
                       <li key={asset.id} className="flex flex-wrap items-baseline gap-2">
+                        <span className="shrink-0 rounded-full bg-[#F0F0F2] px-2 py-0.5 text-[10px] font-medium text-apple-subtextAlt ring-1 ring-inset ring-[#E2E2E6]">
+                          studio 临时
+                        </span>
                         <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] text-apple-subtext ring-1 ring-inset ring-black/[0.06]">
                           {KIND_LABEL[asset.kind] ?? asset.kind}
                         </span>
@@ -265,11 +273,20 @@ export function StudioJobDetail({
                 </ul>
               ) : (
                 <p className="text-[11px] text-apple-subtext">
-                  暂无资产。任务未完成，或当前服务无法读取 studio 文件（NAS 未挂载媒体属 W2 边界）。
+                  暂无 studio 临时资产。任务未完成，或当前服务无法读取 studio 文件（NAS 未挂载媒体属 W2 边界）。
                 </p>
               )}
             </DetailSection>
           </div>
+
+          {media &&
+            (media.loading || media.error || mediaForJob(media.items, job.id).length > 0) && (
+              <div className="md:col-span-2">
+                <DetailSection title="NAS 已发布媒体">
+                  <StudioMediaAssets jobId={job.id} media={media} />
+                </DetailSection>
+              </div>
+            )}
 
           {detail.error && (
             <div className="md:col-span-2">

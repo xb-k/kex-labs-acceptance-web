@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
-import { getJson, postJson } from '../../api'
+import { getJson, postJson, useLiveJson } from '../../api'
+import { MEDIA_JOBS_URL, mediaItemsOf, type MediaJobsResponse } from '../../media-jobs'
+import type { MediaJobsState } from './StudioMediaAssets'
 import { formatClockMs, formatStamp } from '../../format'
 import { formatHttpError, useCopyToClipboard, useInfiniteScrollBatch, useModalA11y } from '../../hooks'
 import type { StudioBrief, StudioJob, StudioJobStatus, StudioJobSummary } from '../../types'
@@ -52,7 +54,8 @@ function JobRow({
   highlighted,
   defaultExpanded = false,
   focusSignal,
-  onRefresh
+  onRefresh,
+  media
 }: {
   job: StudioJobSummary
   briefs: StudioBrief[]
@@ -60,6 +63,7 @@ function JobRow({
   defaultExpanded?: boolean
   focusSignal?: number
   onRefresh: () => void
+  media: MediaJobsState
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
   const [detail, setDetail] = useState<StudioJob | null>(null)
@@ -252,6 +256,7 @@ function JobRow({
           loading={detailLoading}
           error={detailError}
           onRetry={() => setDetailNonce((value) => value + 1)}
+          media={media}
         />
       )}
     </li>
@@ -299,6 +304,15 @@ export function StudioQueueDrawer({
   const [filter, setFilter] = useState<QueueFilter>('all')
 
   useModalA11y(open, drawerRef, onClose, closeRef, triggerRef)
+
+  // #160: NAS 媒体列表抽屉级只拉一次（8s 刷新），行内按 job 过滤，删除后 refresh。
+  const mediaState = useLiveJson<MediaJobsResponse>(open ? MEDIA_JOBS_URL : null, 8000)
+  const media: MediaJobsState = {
+    items: mediaItemsOf(mediaState.data),
+    loading: mediaState.status === 'loading',
+    error: mediaState.error,
+    onRefresh: mediaState.refresh
+  }
 
   const counts = useMemo(() => {
     const map: Record<StudioJobStatus, number> = {
@@ -458,6 +472,7 @@ export function StudioQueueDrawer({
                     defaultExpanded={job.id === focusJobId}
                     focusSignal={job.id === focusJobId ? focusNonce : undefined}
                     onRefresh={onRefresh}
+                    media={media}
                   />
                 ))}
               </ul>

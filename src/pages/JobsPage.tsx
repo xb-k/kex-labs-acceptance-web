@@ -9,6 +9,13 @@ import { ChevronRight, Clapper, Film, Refresh } from '../components/icons'
 import { formatResolution, formatStamp } from '../format'
 import { jobIdDisplay, jobReadable, matchesJobQuery } from '../job-label'
 import { formatJobDuration } from '../image-workbench'
+import {
+  MEDIA_JOBS_URL,
+  mediaItemsOf,
+  pickJobMedia,
+  type MediaJobItem,
+  type MediaJobsResponse
+} from '../media-jobs'
 import { readSearchParam, updateSearchParams } from '../url'
 import { SelectMenu } from '../components/SelectMenu'
 import { FilterChipGroup } from '../components/ui'
@@ -69,19 +76,36 @@ export function studioJobThumbKind(
   return job.type === 'image' ? 'image' : 'video'
 }
 
-/** #159: /jobs 工坊行左侧真实缩略（失败/未完成任务用图标占位）。 */
-function StudioJobThumb({ job }: { job: StudioJobSummary }) {
-  const [mediaFailed, setMediaFailed] = useState(false)
-  const kind = studioJobThumbKind(job, mediaFailed)
+/**
+ * #160: 缩略候选链 —— 优先 NAS 已发布媒体（video: final.mp4 / image: image-01.png），
+ * 其次现有 studio artifact 代理；空数组表示直接用图标（未完成任务）。
+ */
+export function studioJobThumbSources(job: StudioJobSummary, media: MediaJobItem[] = []): string[] {
+  if (job.status !== 'succeeded') return []
+  const prefer = job.type === 'image' ? 'image' : 'video'
+  const nas = pickJobMedia(media, job.id, prefer)
+  const studio = studioArtifactUrl(job.id, prefer === 'image' ? 'image-01.png' : 'final.mp4')
+  return [nas?.url, studio].filter((url): url is string => Boolean(url))
+}
+
+/** #159: /jobs 工坊行左侧真实缩略（NAS → studio artifact → 图标，逐级 onError 回退）。 */
+function StudioJobThumb({ job, media = [] }: { job: StudioJobSummary; media?: MediaJobItem[] }) {
+  const [failedUrls, setFailedUrls] = useState<string[]>([])
+  const sources = studioJobThumbSources(job, media)
+  const src = sources.find((url) => !failedUrls.includes(url)) ?? null
+  const kind = src === null ? 'icon' : job.type === 'image' ? 'image' : 'video'
+  const source = src === null ? undefined : src.startsWith('/api/media/jobs/') ? 'nas' : 'studio'
+  const fail = () => setFailedUrls((prev) => (src ? [...prev, src] : prev))
   return (
     <span
       data-testid={`studio-job-thumb-${job.id}`}
       data-thumb-kind={kind}
+      data-thumb-source={source}
       className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-black/[0.06] text-apple-subtext sm:h-16 sm:w-16"
     >
-      {kind === 'video' && (
+      {kind === 'video' && src && (
         <video
-          src={studioArtifactUrl(job.id, 'final.mp4')}
+          src={src}
           className="h-full w-full object-cover"
           muted
           playsInline
@@ -91,16 +115,16 @@ function StudioJobThumb({ job }: { job: StudioJobSummary }) {
             const video = event.currentTarget
             video.currentTime = studioVideoPreviewSeek(video.duration)
           }}
-          onError={() => setMediaFailed(true)}
+          onError={fail}
         />
       )}
-      {kind === 'image' && (
+      {kind === 'image' && src && (
         <img
-          src={studioArtifactUrl(job.id, 'image-01.png')}
+          src={src}
           alt=""
           loading="lazy"
           className="h-full w-full object-cover"
-          onError={() => setMediaFailed(true)}
+          onError={fail}
         />
       )}
       {kind === 'icon' && <Film className="h-6 w-6" aria-hidden="true" />}
@@ -109,10 +133,16 @@ function StudioJobThumb({ job }: { job: StudioJobSummary }) {
 }
 
 /** #154: /jobs 工坊任务行主体（不含 Link 外壳），导出以便 SSR 断言耗时展示。 */
-export function StudioJobRowContent({ job }: { job: StudioJobSummary }) {
+export function StudioJobRowContent({
+  job,
+  media = []
+}: {
+  job: StudioJobSummary
+  media?: MediaJobItem[]
+}) {
   return (
     <div className="flex min-w-0 flex-1 items-center gap-3">
-      <StudioJobThumb job={job} />
+      <StudioJobThumb job={job} media={media} />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <span
@@ -156,6 +186,9 @@ function StudioJobsTab({ query }: { query: string }) {
     '/api/studio/jobs?limit=50',
     4000
   )
+  // NAS 已发布媒体：缩略优先用真实归档文件，列表整体缺失时退回 studio artifact。
+  const mediaState = useLiveJson<MediaJobsResponse>(MEDIA_JOBS_URL, 4000)
+  const media = mediaItemsOf(mediaState.data)
   const [statusFilter, setStatusFilter] = useState<StudioStatusFilter>('all')
   const [sortMode, setSortMode] = useState<SortMode>('default')
 
@@ -334,7 +367,7 @@ function StudioJobsTab({ query }: { query: string }) {
                     to={`/studio?job=${encodeURIComponent(job.id)}`}
                     className="flex min-w-0 items-center gap-3 px-4 py-3 transition-colors hover:bg-black/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-apple-blue/50"
                   >
-                    <StudioJobRowContent job={job} />
+                    <StudioJobRowContent job={job} media={media} />
                     <ChevronRight className="h-3.5 w-3.5 shrink-0 text-apple-subtext" aria-hidden="true" />
                   </Link>
                 </li>
