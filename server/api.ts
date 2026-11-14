@@ -62,6 +62,7 @@ import { handleAgentLibraryRoute } from './agent-sync'
 import { handleDecisionsRoute } from './decisions'
 import { handleGeminiRoute } from './gemini'
 import { handlePoseLibraryRoute } from './pose-library'
+import { handlePromptPresetsRoute } from './prompt-presets'
 import { handleScriptTemplatesRoute } from './script-templates-api'
 import { ollamaFetch } from './ollama'
 import { handleUploadsRoute } from './uploads'
@@ -4465,6 +4466,18 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
 
   if (pathname === '/api/pose-library' || pathname.startsWith('/api/pose-library/')) {
     await handlePoseLibraryRoute(req, res, url, pathname, {
+      dataRoot: DATA_ROOT,
+      readJson,
+      atomicWriteJson,
+      readBody: readRequestBody,
+      authorize: (r) => authorizeTaskWrite(r),
+      sendJson
+    })
+    return
+  }
+
+  if (pathname === '/api/prompt-presets' || pathname.startsWith('/api/prompt-presets/')) {
+    await handlePromptPresetsRoute(req, res, url, pathname, {
       dataRoot: DATA_ROOT,
       readJson,
       atomicWriteJson,
