@@ -380,10 +380,15 @@ export type DeliveryRepair = {
 export type Delivery = {
   jobId: string
   title: string
+  /** #159：交付资产类型；旧数据缺省按 video 渲染。 */
+  kind?: 'video' | 'image'
   durationS: number | null
   width: number | null
   height: number | null
+  /** 视频地址；image 行为空串。 */
   mp4: string
+  /** image 行的 NAS 图片地址；video 行为 null。 */
+  image?: string | null
   poster: string | null
   /** 16:9 裁切封面（`cover_16x9.jpg`），可能缺失。 */
   coverUrl?: string | null

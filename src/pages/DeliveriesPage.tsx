@@ -9,6 +9,7 @@ import { ShareButton } from '../components/ShareDialog'
 import { SelectMenu } from '../components/SelectMenu'
 import { FilterChipGroup, ToolButton } from '../components/ui'
 import { formatBytes, formatDuration, formatFullStamp, formatResolution } from '../format'
+import { MEDIA_DELETE_CONFIRM } from '../media-jobs'
 import { formatHttpError, useInfiniteScrollBatch, useModalA11y, useToast } from '../hooks'
 
 const BYTE_OPTS = { fallback: '大小未知', zeroAsFallback: true, showKb: true } as const
@@ -141,7 +142,37 @@ function RepairPanel({ repair, jobId }: { repair: DeliveryRepair; jobId: string 
 
 const MENU_ESTIMATED_HEIGHT = 48
 
-/** 播放弹层：原生 <video controls>，服务端 /media/out 已支持 Range。 */
+/** #159：image 行判定；旧数据无 `kind` 时按 video 处理。 */
+export function deliveryIsImage(item: Delivery): boolean {
+  return item.kind === 'image'
+}
+
+/** image 行的 NAS 图片地址；video 行返回 null。 */
+export function deliveryImageSrc(item: Delivery): string | null {
+  return deliveryIsImage(item) ? item.image ?? item.coverUrl ?? item.poster ?? null : null
+}
+
+/** 删除确认文案：NAS 图片物理删除；旧 b-track 交付仍走回收站。 */
+export function deliveryDeleteCopy(item: Delivery): {
+  title: string
+  body: string
+  confirm: string
+} {
+  if (deliveryIsImage(item)) {
+    return {
+      title: '永久删除 NAS 图片？',
+      body: `${MEDIA_DELETE_CONFIRM}。`,
+      confirm: '永久删除'
+    }
+  }
+  return {
+    title: '移入回收站？',
+    body: '交付文件会移到 NAS 回收站，可人工移回恢复；不会永久删除内容。',
+    confirm: '移入回收站'
+  }
+}
+
+/** 播放/预览弹层：视频用原生 <video controls>，图片用 <img>（服务端已支持 Range）。 */
 function PlayerDialog({ item, onClose }: { item: Delivery; onClose: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -160,6 +191,7 @@ function PlayerDialog({ item, onClose }: { item: Delivery; onClose: () => void }
   useModalA11y(true, panelRef, close, closeButtonRef)
 
   const poster = item.coverUrl ?? item.poster ?? undefined
+  const imageSrc = deliveryImageSrc(item)
 
   return createPortal(
     <div
@@ -176,23 +208,32 @@ function PlayerDialog({ item, onClose }: { item: Delivery; onClose: () => void }
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={metaId}
-        data-testid="delivery-player"
+        data-testid={imageSrc ? 'delivery-preview' : 'delivery-player'}
         className={`relative flex max-h-[100dvh] w-full flex-col overflow-hidden bg-white sm:max-h-[90dvh] sm:max-w-[min(1100px,92vw)] sm:rounded-card ${
           closing ? 'dialog-panel-closing' : 'dialog-panel'
         }`}
       >
         <div className="flex min-h-0 flex-1 items-center justify-center bg-black">
-          <video
-            src={item.mp4}
-            poster={poster}
-            controls
-            playsInline
-            preload="metadata"
-            data-testid="delivery-player-video"
-            className="max-h-[62dvh] w-full bg-black sm:max-h-[74dvh]"
-          >
-            当前浏览器不支持内嵌视频，请直接下载 MP4。
-          </video>
+          {imageSrc ? (
+            <img
+              src={imageSrc}
+              alt={item.title}
+              data-testid="delivery-preview-image"
+              className="max-h-[62dvh] w-full object-contain sm:max-h-[74dvh]"
+            />
+          ) : (
+            <video
+              src={item.mp4}
+              poster={poster}
+              controls
+              playsInline
+              preload="metadata"
+              data-testid="delivery-player-video"
+              className="max-h-[62dvh] w-full bg-black sm:max-h-[74dvh]"
+            >
+              当前浏览器不支持内嵌视频，请直接下载 MP4。
+            </video>
+          )}
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
           <div className="min-w-0">
@@ -200,23 +241,24 @@ function PlayerDialog({ item, onClose }: { item: Delivery; onClose: () => void }
               {item.title}
             </h2>
             <p id={metaId} className="num mt-0.5 text-[11px] leading-relaxed text-apple-subtext">
-              {formatDuration(item.durationS)} · {formatResolution(item.width, item.height)} · {item.gate} · 任务 ID{' '}
-              {item.jobId}
+              {imageSrc
+                ? `图片 · ${item.gate} · 任务 ID ${item.jobId}`
+                : `${formatDuration(item.durationS)} · ${formatResolution(item.width, item.height)} · ${item.gate} · 任务 ID ${item.jobId}`}
             </p>
           </div>
           <a
-            href={withDownload(item.mp4)}
-            download={`${item.jobId}.mp4`}
+            href={withDownload(imageSrc ?? item.mp4)}
+            download={imageSrc ? `${item.jobId}-image` : `${item.jobId}.mp4`}
             className="press inline-flex h-8 items-center rounded-lg bg-apple-bg px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-[#ECECEF] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
           >
-            下载 MP4
+            {imageSrc ? '下载图片' : '下载 MP4'}
           </a>
         </div>
         <button
           ref={closeButtonRef}
           type="button"
           onClick={close}
-          aria-label="关闭播放器"
+          aria-label={imageSrc ? '关闭预览' : '关闭播放器'}
           data-testid="delivery-player-close"
           className="absolute right-2 top-2 grid h-9 w-9 place-items-center rounded-full bg-black/55 text-white transition-colors hover:bg-black/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
         >
@@ -245,6 +287,7 @@ function DeleteDialog({
   const panelRef = useRef<HTMLDivElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const titleId = useId()
+  const copy = deliveryDeleteCopy(item)
   const close = useCallback(() => {
     if (!busy) onCancel()
   }, [busy, onCancel])
@@ -267,11 +310,9 @@ function DeleteDialog({
         className="dialog-panel w-full rounded-t-[20px] border border-black/[0.08] bg-white p-5 shadow-lift sm:max-w-[420px] sm:rounded-card"
       >
         <h2 id={titleId} className="text-[17px] font-semibold tracking-[-0.01em]">
-          移入回收站？
+          {copy.title}
         </h2>
-        <p className="mt-1.5 text-sm leading-relaxed text-apple-subtext">
-          交付文件会移到 NAS 回收站，可人工移回恢复；不会永久删除内容。
-        </p>
+        <p className="mt-1.5 text-sm leading-relaxed text-apple-subtext">{copy.body}</p>
         <dl className="num mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 rounded-xl bg-apple-bg px-3 py-2.5 text-xs">
           <dt className="text-apple-subtext">任务 ID</dt>
           <dd className="truncate font-medium" data-testid="delivery-delete-id">
@@ -310,7 +351,11 @@ function DeleteDialog({
             className="press inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#B3261E] px-3.5 text-xs font-medium text-white transition-colors hover:bg-[#98200F] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B3261E]/50 disabled:opacity-60"
           >
             <Trash className="h-3.5 w-3.5" />
-            {busy ? '正在移入…' : '移入回收站'}
+            {busy
+              ? deliveryIsImage(item)
+                ? '正在删除…'
+                : '正在移入…'
+              : copy.confirm}
           </button>
         </div>
       </div>
@@ -444,7 +489,7 @@ function MoreMenu({
   )
 }
 
-function DeliveryCard({
+export function DeliveryCard({
   item,
   onDeleted
 }: {
@@ -460,6 +505,9 @@ function DeliveryCard({
   const moreRef = useRef<HTMLButtonElement>(null)
   const playRef = useRef<HTMLButtonElement>(null)
   const repair = item.repair ?? null
+  const isImage = deliveryIsImage(item)
+  const imageSrc = deliveryImageSrc(item)
+  const mediaUrl = imageSrc ?? item.mp4
   const sources = [item.coverUrl, item.poster].filter((value): value is string => Boolean(value))
 
   const confirmDelete = async () => {
@@ -484,18 +532,41 @@ function DeliveryCard({
       <article
         data-testid="delivery-card"
         data-job-id={item.jobId}
+        data-kind={isImage ? 'image' : 'video'}
         data-created-at={item.createdAt ?? ''}
         data-repaired={repair?.repaired ? 'true' : 'false'}
         className="card card-interactive flex h-full flex-col overflow-hidden"
       >
         <div className="relative aspect-video w-full overflow-hidden bg-[#ECECEF]">
-          <Cover sources={sources} title={item.title} />
-          <span
-            data-testid="delivery-duration"
-            className="num pointer-events-none absolute bottom-2 right-2 inline-flex h-6 items-center rounded-md bg-black/65 px-2 text-[11px] font-medium text-white backdrop-blur-md"
-          >
-            {formatDuration(item.durationS)}
-          </span>
+          {isImage ? (
+            <button
+              type="button"
+              onClick={() => setPlayOpen(true)}
+              data-testid="delivery-preview"
+              aria-label={`预览图片：${item.title}`}
+              className="block h-full w-full cursor-zoom-in focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-apple-blue/50"
+            >
+              <Cover sources={sources} title={item.title} />
+            </button>
+          ) : (
+            <Cover sources={sources} title={item.title} />
+          )}
+          {!isImage && (
+            <span
+              data-testid="delivery-duration"
+              className="num pointer-events-none absolute bottom-2 right-2 inline-flex h-6 items-center rounded-md bg-black/65 px-2 text-[11px] font-medium text-white backdrop-blur-md"
+            >
+              {formatDuration(item.durationS)}
+            </span>
+          )}
+          {isImage && (
+            <span
+              data-testid="delivery-kind-image"
+              className="num pointer-events-none absolute bottom-2 right-2 inline-flex h-6 items-center rounded-md bg-black/65 px-2 text-[11px] font-medium text-white backdrop-blur-md"
+            >
+              图片
+            </span>
+          )}
         </div>
 
         <div className="flex flex-1 flex-col p-4">
@@ -524,7 +595,9 @@ function DeliveryCard({
           </h2>
 
           <p className="num mt-1 text-xs text-apple-subtext">
-            {formatDuration(item.durationS)} · {formatResolution(item.width, item.height)}
+            {isImage
+              ? `图片 · ${formatBytes(item.bytes, BYTE_OPTS)}`
+              : `${formatDuration(item.durationS)} · ${formatResolution(item.width, item.height)}`}
           </p>
 
           <p className="mt-2 text-xs text-apple-subtext" data-testid="delivery-score" data-score={item.score ?? ''}>
@@ -550,19 +623,19 @@ function DeliveryCard({
               ref={playRef}
               type="button"
               onClick={() => setPlayOpen(true)}
-              data-testid="delivery-play"
+              data-testid={isImage ? 'delivery-preview-button' : 'delivery-play'}
               className="press inline-flex h-8 items-center gap-1.5 rounded-lg bg-apple-text px-2.5 text-xs font-medium text-white transition-colors hover:bg-black focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
             >
               <Play className="h-3.5 w-3.5" />
-              播放
+              {isImage ? '预览' : '播放'}
             </button>
             <a
-              href={withDownload(item.mp4)}
-              download={`${item.jobId}.mp4`}
-              data-testid="download-mp4"
+              href={withDownload(mediaUrl)}
+              download={isImage ? `${item.jobId}-image` : `${item.jobId}.mp4`}
+              data-testid={isImage ? 'download-image' : 'download-mp4'}
               className="press inline-flex h-8 items-center rounded-lg bg-apple-bg px-2.5 text-xs font-medium text-apple-text transition-colors hover:bg-[#ECECEF] focus:outline-none focus-visible:ring-2 focus-visible:ring-apple-blue/50"
             >
-              下载 MP4
+              {isImage ? '下载图片' : '下载 MP4'}
             </a>
             {item.report ? (
               <a
@@ -618,13 +691,13 @@ function DeliveryCard({
                       className="mt-0.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-[#B3261E] transition-colors hover:bg-[#FCEDEB] focus:outline-none focus-visible:bg-[#FCEDEB] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#B3261E]/40"
                     >
                       <Trash className="h-3.5 w-3.5" />
-                      删除（移入回收站）
+                      {deliveryIsImage(item) ? '删除（永久删除）' : '删除（移入回收站）'}
                     </button>
                   </>
                 )}
               </MoreMenu>
               <ShareButton
-                path={item.mp4}
+                path={mediaUrl}
                 name={item.title}
                 hideTrigger
                 open={shareOpen}
@@ -721,7 +794,12 @@ export function DeliveriesPage() {
   const onDeleted = useCallback(
     (item: Delivery, result: DeliveryTrashResponse) => {
       setRemovedIds((current) => new Set(current).add(item.jobId))
-      showToast(`已将 ${item.jobId} 移入回收站（${formatBytes(result.bytes, BYTE_OPTS)}），可人工移回恢复。`, 'ok')
+      showToast(
+        deliveryIsImage(item)
+          ? `已永久删除 ${item.jobId} 的 NAS 图片（${formatBytes(result.bytes, BYTE_OPTS)}），不可恢复。`
+          : `已将 ${item.jobId} 移入回收站（${formatBytes(result.bytes, BYTE_OPTS)}），可人工移回恢复。`,
+        'ok'
+      )
     },
     [showToast]
   )
@@ -732,7 +810,7 @@ export function DeliveriesPage() {
         <div>
           <h1 className="text-[28px] font-semibold leading-tight tracking-[-0.02em] sm:text-[32px]">交付与资产</h1>
           <p className="mt-1.5 max-w-[76ch] text-sm leading-relaxed text-apple-subtext">
-            真实成片、封面裁切、AI 修复记录与下载入口；可在线播放，删除会移入 NAS 回收站（可人工恢复）。
+            真实成片、NAS 图片、封面裁切、AI 修复记录与下载入口；可在线播放或预览，NAS 媒体删除为物理删除（不可恢复）。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">

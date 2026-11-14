@@ -57,10 +57,6 @@ const STUDIO_STATUS_RANK: Record<StudioJobStatus, number> = {
   canceled: 4
 }
 
-function studioArtifactUrl(id: string, name: string): string {
-  return `/api/studio/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}`
-}
-
 /** #159: 视频缩略取帧位置；未知时长按 0.4s，极短片取一半避免越界。 */
 export function studioVideoPreviewSeek(duration: number): number {
   if (!Number.isFinite(duration) || duration <= 0) return 0.4
@@ -77,24 +73,24 @@ export function studioJobThumbKind(
 }
 
 /**
- * #160: 缩略候选链 —— 优先 NAS 已发布媒体（video: final.mp4 / image: image-01.png），
- * 其次现有 studio artifact 代理；空数组表示直接用图标（未完成任务）。
+ * #160: 缩略候选链 —— 成功任务只用 NAS 已发布媒体（video: final.mp4 /
+ * image: image-01.png）；无 NAS 媒体返回空数组直接用图标，不再回退 studio
+ * artifact（旧 job 的 artifact 已清理，回退只会得到 404）。未完成任务同样为空。
  */
 export function studioJobThumbSources(job: StudioJobSummary, media: MediaJobItem[] = []): string[] {
   if (job.status !== 'succeeded') return []
   const prefer = job.type === 'image' ? 'image' : 'video'
   const nas = pickJobMedia(media, job.id, prefer)
-  const studio = studioArtifactUrl(job.id, prefer === 'image' ? 'image-01.png' : 'final.mp4')
-  return [nas?.url, studio].filter((url): url is string => Boolean(url))
+  return nas ? [nas.url] : []
 }
 
-/** #159: /jobs 工坊行左侧真实缩略（NAS → studio artifact → 图标，逐级 onError 回退）。 */
+/** #159: /jobs 工坊行左侧真实缩略（NAS → 图标，加载失败不显示破图）。 */
 function StudioJobThumb({ job, media = [] }: { job: StudioJobSummary; media?: MediaJobItem[] }) {
   const [failedUrls, setFailedUrls] = useState<string[]>([])
   const sources = studioJobThumbSources(job, media)
   const src = sources.find((url) => !failedUrls.includes(url)) ?? null
   const kind = src === null ? 'icon' : job.type === 'image' ? 'image' : 'video'
-  const source = src === null ? undefined : src.startsWith('/api/media/jobs/') ? 'nas' : 'studio'
+  const source = src === null ? undefined : 'nas'
   const fail = () => setFailedUrls((prev) => (src ? [...prev, src] : prev))
   return (
     <span

@@ -2,7 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { StudioJobRowContent, studioJobThumbKind, studioVideoPreviewSeek } from './pages/JobsPage'
+import {
+  StudioJobRowContent,
+  studioJobThumbKind,
+  studioJobThumbSources,
+  studioVideoPreviewSeek
+} from './pages/JobsPage'
+import type { MediaJobItem } from './media-jobs'
 import type { StudioJobSummary } from './types'
 
 /** #159 SSR 用：工坊任务摘要，状态/类型可覆盖。 */
@@ -22,30 +28,77 @@ function summary(overrides: Partial<StudioJobSummary> = {}): StudioJobSummary {
   }
 }
 
-function renderRow(overrides: Partial<StudioJobSummary> = {}): string {
-  return renderToStaticMarkup(createElement(StudioJobRowContent, { job: summary(overrides) }))
+function mediaItem(
+  name: string,
+  kind: MediaJobItem['kind'],
+  jobId = 'web-20261114120000-abcd12'
+): MediaJobItem {
+  return {
+    job_id: jobId,
+    name,
+    path: `media/jobs/${jobId}/${name}`,
+    url: `/api/media/jobs/${jobId}/${name}`,
+    size: 2048,
+    bytes: 2048,
+    mtime: '2026-11-14T12:10:00.000Z',
+    kind
+  }
 }
 
-test('#159 成功视频任务行渲染 final.mp4 缩略（静音 + 预载元数据）', () => {
-  const html = renderRow()
+function renderRow(
+  overrides: Partial<StudioJobSummary> = {},
+  media: MediaJobItem[] = []
+): string {
+  return renderToStaticMarkup(createElement(StudioJobRowContent, { job: summary(overrides), media }))
+}
+
+test('#159 成功视频任务行渲染 NAS final.mp4 缩略（静音 + 预载元数据）', () => {
+  const html = renderRow({}, [mediaItem('final.mp4', 'video')])
   assert.match(html, /data-testid="studio-job-thumb-web-20261114120000-abcd12"/)
   assert.match(html, /data-thumb-kind="video"/)
-  assert.match(html, /src="\/api\/studio\/jobs\/web-20261114120000-abcd12\/artifacts\/final\.mp4"/)
+  assert.match(html, /data-thumb-source="nas"/)
+  assert.match(
+    html,
+    /src="\/api\/media\/jobs\/web-20261114120000-abcd12\/final\.mp4"/
+  )
   assert.match(html, /muted/)
   assert.match(html, /playsinline/)
   assert.match(html, /preload="metadata"/)
   assert.doesNotMatch(html, /image-01\.png/)
+  assert.doesNotMatch(html, /\/api\/studio\/jobs\//)
 })
 
-test('#159 成功图片任务行渲染 image-01.png 缩略', () => {
-  const html = renderRow({ type: 'image' })
+test('#159 成功图片任务行渲染 NAS image-01.png 缩略', () => {
+  const html = renderRow({ type: 'image' }, [mediaItem('image-01.png', 'image')])
   assert.match(html, /data-thumb-kind="image"/)
-  assert.match(html, /src="\/api\/studio\/jobs\/web-20261114120000-abcd12\/artifacts\/image-01\.png"/)
+  assert.match(html, /data-thumb-source="nas"/)
+  assert.match(
+    html,
+    /src="\/api\/media\/jobs\/web-20261114120000-abcd12\/image-01\.png"/
+  )
   assert.doesNotMatch(html, /final\.mp4/)
+  assert.doesNotMatch(html, /\/api\/studio\/jobs\//)
+})
+
+test('#160 成功任务无 NAS 媒体时返回空候选链（图标），不回退 studio artifact', () => {
+  assert.deepEqual(studioJobThumbSources(summary()), [])
+  assert.deepEqual(studioJobThumbSources(summary({ type: 'image' })), [])
+  const video = renderRow()
+  assert.match(video, /data-thumb-kind="icon"/)
+  assert.match(video, /<svg/)
+  assert.doesNotMatch(video, /final\.mp4/)
+  assert.doesNotMatch(video, /\/api\/studio\/jobs\//)
+
+  const image = renderRow({ type: 'image' })
+  assert.match(image, /data-thumb-kind="icon"/)
+  assert.doesNotMatch(image, /image-01\.png/)
+  assert.doesNotMatch(image, /\/api\/studio\/jobs\//)
 })
 
 test('#159 失败任务行不出媒体，回退 Film 图标', () => {
-  const html = renderRow({ status: 'failed', error: 'B2_net_gain' })
+  const html = renderRow({ status: 'failed', error: 'B2_net_gain' }, [
+    mediaItem('final.mp4', 'video')
+  ])
   assert.match(html, /data-thumb-kind="icon"/)
   assert.match(html, /<svg/)
   assert.doesNotMatch(html, /final\.mp4/)
@@ -53,7 +106,7 @@ test('#159 失败任务行不出媒体，回退 Film 图标', () => {
 })
 
 test('#159 进行中任务行不做假预览', () => {
-  const html = renderRow({ status: 'running' })
+  const html = renderRow({ status: 'running' }, [mediaItem('final.mp4', 'video')])
   assert.match(html, /data-thumb-kind="icon"/)
   assert.doesNotMatch(html, /final\.mp4/)
   assert.doesNotMatch(html, /image-01\.png/)

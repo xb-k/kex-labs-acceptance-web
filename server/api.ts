@@ -1661,10 +1661,12 @@ export async function deliveriesData(limit?: number) {
       return {
         jobId: item.id,
         title: item.title,
+        kind: 'video',
         durationS: item.durationS,
         width: item.width,
         height: item.height,
         mp4: `/media/out/${item.id}`,
+        image: null as string | null,
         poster: item.media.poster,
         coverUrl: exists(cover16) ? (`/media/artifact?path=${encodeURIComponent(rel(cover16))}`) : null,
         report: item.reportPath
@@ -1681,13 +1683,14 @@ export async function deliveriesData(limit?: number) {
     .filter((row): row is NonNullable<typeof row> => row !== null)
     .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
 
-  // NAS `media/jobs/*` videos become deliveries too. b-track rows win on a
-  // duplicate job id; media rows carry no probe data (duration/size unknown).
+  // NAS `media/jobs/*` videos and images become deliveries too. b-track rows
+  // win on a duplicate job id; media rows carry no probe data (duration/size
+  // unknown). Image rows put the file itself in `image`/`poster`/`coverUrl`.
   const seenJobs = new Set(out.map((row) => row.jobId))
   const metaCache = new Map<string, any>()
   const mediaRows: typeof out = []
   for (const item of listMediaJobs({ dataRoot: DATA_ROOT })) {
-    if (item.kind !== 'video') continue
+    if (item.kind !== 'video' && item.kind !== 'image') continue
     if (seenJobs.has(item.job_id)) continue
     seenJobs.add(item.job_id)
     let meta = metaCache.get(item.job_id)
@@ -1695,15 +1698,18 @@ export async function deliveriesData(limit?: number) {
       meta = jobMeta(item.job_id, { dataRoot: DATA_ROOT, readJson })
       metaCache.set(item.job_id, meta)
     }
+    const isImage = item.kind === 'image'
     mediaRows.push({
       jobId: item.job_id,
       title: mediaDeliveryTitle(meta, item.name),
+      kind: item.kind,
       durationS: null,
       width: null,
       height: null,
-      mp4: item.url,
-      poster: null,
-      coverUrl: null,
+      mp4: isImage ? '' : item.url,
+      image: isImage ? item.url : null,
+      poster: isImage ? item.url : null,
+      coverUrl: isImage ? item.url : null,
       report: null,
       score: null,
       gate: '已发布',

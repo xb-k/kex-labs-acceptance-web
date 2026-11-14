@@ -268,7 +268,12 @@ test('deliveriesData 合并 media 视频、与 b-track 同 job 去重、limit �
   assert.ok(ids.includes('media-video'))
   assert.ok(ids.includes('s0'))
   assert.equal(ids.filter((id: string) => id === 's0').length, 1, 'b-track/media duplicate must collapse')
-  assert.equal(ids.includes('media-image'), false, 'only video rows merge')
+  assert.equal(ids.includes('media-image'), true, 'video and image rows merge')
+  const image = deliveries.find((row: any) => row.jobId === 'media-image')
+  assert.ok(image)
+  assert.equal(image.kind, 'image')
+  assert.equal(image.image, '/api/media/jobs/media-image/cover.png')
+  assert.equal(image.mp4, '')
 
   const media = deliveries.find((row: any) => row.jobId === 'media-video')
   assert.ok(media)
