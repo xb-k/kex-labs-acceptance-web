@@ -298,4 +298,6 @@ test('#137 SSR 面板：标题 / 模板名输入 / 保存按钮 / 加载状态',
   assert.match(markup, /data-testid="prompt-preset-save"/)
   assert.match(markup, /保存当前提示词为模板/)
   assert.match(markup, /data-testid="prompt-preset-loading"/)
+  // 面板嵌在 A 轨制片 <form> 内：自带 <form> 会触发浏览器原生提交、整页刷新（线上回归）。
+  assert.doesNotMatch(markup, /<form/)
 })

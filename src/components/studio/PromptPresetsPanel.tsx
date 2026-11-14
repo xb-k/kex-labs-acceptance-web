@@ -8,7 +8,6 @@
  * - 纯展示子组件（Badge / List / Row）可用 react-dom/server 做 SSR 断言。
  */
 import { useEffect, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
 import { useJson } from '../../api'
 import { useModalA11y } from '../../hooks'
 import {
@@ -631,8 +630,7 @@ export function PromptPresetsPanel({
     listing.status === 'ready' ? promptPresetReferenceIssue(reference, items) : null
   const promptLength = [...prompt].length
 
-  const saveTemplate = async (event: FormEvent) => {
-    event.preventDefault()
+  const saveTemplate = async () => {
     if (saving) return
     const nameIssue = validatePresetName(name)
     const promptIssue = validatePresetPrompt(prompt)
@@ -725,16 +723,20 @@ export function PromptPresetsPanel({
         }}
       />
 
-      <form
-        onSubmit={(event) => void saveTemplate(event)}
-        className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"
-      >
+      {/* 不能嵌 <form>：本面板挂在 A 轨制片表单内部，浏览器原生提交会整页刷新。 */}
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="text"
           value={name}
           onChange={(event) => {
             setName(event.target.value)
             setSaveError(null)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              void saveTemplate()
+            }
           }}
           placeholder={`模板名（最多 ${PRESET_NAME_MAX} 字）`}
           aria-label="新模板名称"
@@ -744,7 +746,8 @@ export function PromptPresetsPanel({
           className={`${inputClass} h-9 min-w-0 flex-1 text-[12px]`}
         />
         <button
-          type="submit"
+          type="button"
+          onClick={() => void saveTemplate()}
           disabled={saving}
           data-testid="prompt-preset-save"
           className={`${primaryButton} h-9 w-full shrink-0 gap-1.5 px-3.5 text-[12px] sm:w-auto`}
@@ -752,7 +755,7 @@ export function PromptPresetsPanel({
           <Plus className="h-3.5 w-3.5" />
           {saving ? '保存中…' : '保存当前提示词为模板'}
         </button>
-      </form>
+      </div>
       <p className="mt-1 text-[10.5px] leading-relaxed text-apple-subtext">
         当前提示词 {promptLength} 字；保存后自动引用新模板 v1。
       </p>
