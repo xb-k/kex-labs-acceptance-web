@@ -457,26 +457,41 @@ function readLocalPreview(dataRoot: string, previewUrl: string): PreviewResult {
   }
 }
 
-type FetchAttempt =
-  | { ok: true; response: Response }
-  | { ok: false; reason: string }
-
 async function fetchPreviewAttempt(
   fetchImpl: FetchLike,
   target: string,
   init: RequestInit | undefined,
-  timeoutMs: number
-): Promise<FetchAttempt> {
+  timeoutMs: number,
+  pathExt: string | undefined
+): Promise<PreviewResult> {
+  let response: Response
   try {
-    const response = await fetchImpl(target, {
+    response = await fetchImpl(target, {
       ...init,
       signal: AbortSignal.timeout(timeoutMs)
     })
-    if (!response.ok) return { ok: false, reason: `status_${response.status}` }
-    return { ok: true, response }
   } catch {
     return { ok: false, reason: 'fetch_failed' }
   }
+  if (!response.ok) return { ok: false, reason: `status_${response.status}` }
+  const mime = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+  // contents API 的 raw 响应是 `application/vnd.github.raw`，类型从路径后缀补。
+  const ext = PREVIEW_MIME_EXT[mime] ?? pathExt
+  if (!ext) return { ok: false, reason: 'unsupported_type' }
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > PREVIEW_MAX_BYTES) {
+    return { ok: false, reason: 'preview_too_large' }
+  }
+  let bytes: Buffer | null
+  try {
+    // 超时 signal 覆盖到 body 读完：大图在慢链路上卡住时也要能转入 API 兜底。
+    bytes = await readCapped(response, PREVIEW_MAX_BYTES)
+  } catch {
+    return { ok: false, reason: 'fetch_failed' }
+  }
+  if (!bytes) return { ok: false, reason: 'preview_too_large' }
+  if (bytes.length === 0) return { ok: false, reason: 'empty_preview' }
+  return { ok: true, bytes, ext }
 }
 
 /** `preview_url` 只接受 https 或站内 `/media/artifact`；其它一律视为抓取失败。 */
@@ -496,49 +511,29 @@ async function loadPosePreview(
   if (url.protocol !== 'https:') return { ok: false, reason: 'unsupported_protocol' }
 
   const fetchImpl: FetchLike = deps.fetchImpl ?? ((input, init) => fetch(input, init))
-  const primary = await fetchPreviewAttempt(fetchImpl, url.toString(), undefined, PREVIEW_TIMEOUT_MS)
-  let response: Response
-  let viaGithubApi = false
-  if (primary.ok) {
-    response = primary.response
-  } else {
-    const apiUrl = normalizeGithubRawUrl(url.toString())
-    if (!apiUrl) return { ok: false, reason: primary.reason }
-    const env = deps.env ?? process.env
-    const fallback = await fetchPreviewAttempt(
-      fetchImpl,
-      apiUrl,
-      { headers: githubRawHeaders(env) },
-      PREVIEW_API_TIMEOUT_MS
-    )
-    if (!fallback.ok) {
-      return { ok: false, reason: `${primary.reason}|github_api_${fallback.reason}` }
-    }
-    response = fallback.response
-    viaGithubApi = true
+  const primary = await fetchPreviewAttempt(
+    fetchImpl,
+    url.toString(),
+    undefined,
+    PREVIEW_TIMEOUT_MS,
+    undefined
+  )
+  if (primary.ok) return primary
+  const apiUrl = normalizeGithubRawUrl(url.toString())
+  if (!apiUrl) return primary
+  const env = deps.env ?? process.env
+  const fallback = await fetchPreviewAttempt(
+    fetchImpl,
+    apiUrl,
+    { headers: githubRawHeaders(env) },
+    PREVIEW_API_TIMEOUT_MS,
+    PREVIEW_FILE_EXT[path.extname(url.pathname).toLowerCase()]
+  )
+  if (!fallback.ok) {
+    return { ok: false, reason: `${primary.reason}|github_api_${fallback.reason}` }
   }
-  const mime = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
-  // contents API 的 raw 响应是 `application/vnd.github.raw`，类型从路径后缀补。
-  const ext =
-    PREVIEW_MIME_EXT[mime] ??
-    (viaGithubApi ? PREVIEW_FILE_EXT[path.extname(url.pathname).toLowerCase()] : undefined)
-  if (!ext) return { ok: false, reason: 'unsupported_type' }
-  const declared = Number(response.headers.get('content-length'))
-  if (Number.isFinite(declared) && declared > PREVIEW_MAX_BYTES) {
-    return { ok: false, reason: 'preview_too_large' }
-  }
-  let bytes: Buffer | null
-  try {
-    bytes = await readCapped(response, PREVIEW_MAX_BYTES)
-  } catch {
-    return { ok: false, reason: 'fetch_failed' }
-  }
-  if (!bytes) return { ok: false, reason: 'preview_too_large' }
-  if (bytes.length === 0) return { ok: false, reason: 'empty_preview' }
-  return { ok: true, bytes, ext }
+  return fallback
 }
-
-
 
 function methodNotAllowed(res: ServerResponse, allow: string) {
   res.statusCode = 405

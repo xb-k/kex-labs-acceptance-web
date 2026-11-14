@@ -569,6 +569,31 @@ test('materialize：raw 直链失败时用 contents API 兜底（带 raw Accept 
   }
 })
 
+test('materialize：原 URL 读到一半中断也转 API 兜底', async () => {
+  const raw = 'https://raw.githubusercontent.com/dmlc/gluon-cv/HEAD/docs/_static/c.png'
+  const entry = await createPose(raw)
+  previewFetch = async (url) => {
+    if (url === raw) {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(PNG))
+          controller.error(new Error('upstream aborted'))
+        }
+      })
+      return new Response(stream, { status: 200, headers: { 'Content-Type': 'image/png' } })
+    }
+    return new Response(PNG, {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.github.raw' }
+    })
+  }
+
+  const res = await request('POST', `/api/pose-library/${entry.id}/materialize`)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.filename, `pose-${entry.id}.png`)
+  assert.equal(res.body.size, PNG.length)
+})
+
 test('materialize：原 URL 与 API 兜底都失败才 400，reason 记录两段错误', async () => {
   const raw = 'https://raw.githubusercontent.com/dmlc/gluon-cv/HEAD/docs/_static/b.png'
   const entry = await createPose(raw)
