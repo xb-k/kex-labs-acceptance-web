@@ -15,6 +15,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { contentTypeFor, serveStream } from './media'
+import { listMediaJobs } from './media-store'
 import { ollamaFetch } from './ollama'
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
@@ -2401,7 +2402,7 @@ function isTerminalState(state: unknown): boolean {
   return state === 'succeeded' || state === 'failed' || state === 'canceled'
 }
 
-/** #89b gallery projection: only image jobs, URLs always via the proxy. */
+/** #89b/#159 gallery projection: NAS media first, studio artifact proxy as fallback. */
 export interface GalleryItem {
   id: string
   status: JobStatus
@@ -2427,10 +2428,18 @@ export interface GalleryItem {
 export function buildGalleryItem(
   id: string,
   meta: JobMeta | null,
-  detail: any
+  detail: any,
+  nasImages: Array<{ name: string; url: string }> = []
 ): GalleryItem {
+  // #159: published NAS media wins; studio artifacts only fill in-progress /
+  // unpublished names. The same name on both sides resolves to the NAS URL.
   const images: Array<{ name: string; url: string }> = []
   const seen = new Set<string>()
+  for (const media of nasImages) {
+    if (!media.name || seen.has(media.name)) continue
+    seen.add(media.name)
+    images.push({ name: media.name, url: media.url })
+  }
   const artifacts = isPlainObject(detail?.artifacts) ? detail.artifacts : {}
   for (const raw of Object.values(artifacts)) {
     if (typeof raw !== 'string') continue
@@ -2448,6 +2457,10 @@ export function buildGalleryItem(
   const str = (key: string): string | null =>
     typeof image?.[key] === 'string' ? (image[key] as string) : null
   const cover = assetRefFromPath(detail?.cover_asset)
+  // #159: an explicit cover still wins when it exists on NAS; otherwise any
+  // published NAS image beats the (possibly deleted) studio artifact proxy.
+  const nasCover =
+    (cover ? nasImages.find((media) => media.name === cover.name) : undefined) ?? nasImages[0]
   return {
     id,
     status: studioStatus(detail?.state),
@@ -2466,14 +2479,15 @@ export function buildGalleryItem(
     elapsed_s: typeof detail?.elapsed_s === 'number' ? detail.elapsed_s : null,
     duration_ms: resolveJobDurationMs(detail, meta?.created_at ?? null),
     images,
-    cover_url: cover?.url ?? null
+    cover_url: nasCover?.url ?? cover?.url ?? null
   }
 }
 
 /**
  * `GET /api/studio/gallery?job=<id>&limit=24`
- * Lists recent `type=image` jobs (web-created, meta-backed) with their proxy
- * URLs. Details are read per job because the intake list has no artifacts.
+ * Lists recent `type=image` jobs (web-created, meta-backed) with their published
+ * NAS media URLs (studio artifact proxy only as fallback). Details are read per
+ * job because the intake list has no artifacts.
  */
 async function imageGallery(ctx: StudioContext, url: URL, res: ServerResponse) {
   if (!requireIntakeToken(ctx, res)) return
@@ -2494,21 +2508,51 @@ async function imageGallery(ctx: StudioContext, url: URL, res: ServerResponse) {
     return
   }
   const list = Array.isArray(upstream.body?.items) ? upstream.body.items : []
-  const selected: Array<{ id: string; meta: JobMeta | null }> = []
+
+  // #159: final images are published to NAS and their studio artifacts are
+  // deleted, so NAS media is the primary source. Artifacts stay as the
+  // in-progress/unpublished supplement inside buildGalleryItem.
+  const nasByJob = new Map<string, Array<{ name: string; url: string }>>()
+  for (const media of listMediaJobs({ dataRoot: ctx.dataRoot })) {
+    if (media.kind !== 'image') continue
+    const bucket = nasByJob.get(media.job_id) ?? []
+    bucket.push({ name: media.name, url: media.url })
+    nasByJob.set(media.job_id, bucket)
+  }
+
+  const candidates: Array<{ id: string; meta: JobMeta; listed: boolean }> = []
+  const seenJobs = new Set<string>()
   for (const item of list) {
     const id = typeof item?.id === 'string' ? item.id : ''
     if (!id || !JOB_NAME_RE.test(id)) continue
     if (jobFilter && id !== jobFilter) continue
+    if (seenJobs.has(id)) continue
     const meta = readJobMeta(ctx, id)
     if (meta?.type !== 'image') continue
-    selected.push({ id, meta })
-    if (selected.length >= limit) break
+    seenJobs.add(id)
+    candidates.push({ id, meta, listed: true })
   }
+  // NAS-only jobs (older than the intake window) still show up when they have
+  // web meta; media without `studio/jobs/<id>.json` is never invented.
+  for (const id of nasByJob.keys()) {
+    if (jobFilter && id !== jobFilter) continue
+    if (seenJobs.has(id) || !JOB_NAME_RE.test(id)) continue
+    const meta = readJobMeta(ctx, id)
+    if (meta?.type !== 'image') continue
+    seenJobs.add(id)
+    candidates.push({ id, meta, listed: false })
+  }
+
   const items = await Promise.all(
-    selected.map(async ({ id, meta }) => {
+    candidates.slice(0, limit).map(async ({ id, meta, listed }) => {
       const detail = await callIntake(ctx, 'GET', `/intake/jobs/${encodeURIComponent(id)}`)
-      const body = detail.ok && detail.status === 200 ? detail.body : { state: 'queued' }
-      return buildGalleryItem(id, meta, body)
+      const body =
+        detail.ok && detail.status === 200
+          ? detail.body
+          : listed
+            ? { state: 'queued' }
+            : { state: 'succeeded', updated_at: meta.created_at }
+      return buildGalleryItem(id, meta, body, nasByJob.get(id) ?? [])
     })
   )
   ctx.sendJson(res, 200, { items, count: items.length, source: 'studio' })

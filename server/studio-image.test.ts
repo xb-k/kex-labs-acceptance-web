@@ -106,6 +106,15 @@ const DETAILS: Record<string, any> = {
     state: 'succeeded',
     updated_at: '2026-11-13T00:00:07.000Z',
     keyframe_asset: { source_job: 'kf-obj', name: 'pick.png' }
+  },
+  // #159: final images are published to NAS; `a.png` also still reports an
+  // artifact, `b.webp` is unpublished and only exists as a studio artifact.
+  'nas-1': {
+    state: 'succeeded',
+    updated_at: '2026-11-13T00:00:08.000Z',
+    image: { mode: 't2i', prompt: 'NAS 最终图', width: 1024, height: 1024, seed: 9, steps: 24, denoise: 1 },
+    artifacts: { 0: '/studio/jobs/nas-1/output/a.png', 1: '/studio/jobs/nas-1/output/b.webp' },
+    cover_asset: '/studio/jobs/nas-1/output/a.png'
   }
 }
 
@@ -130,6 +139,45 @@ before(async () => {
     input: null,
     created_at: '2026-11-13T00:00:02.000Z',
     image: { mode: 't2i', prompt: 'x' }
+  }
+  // #159 NAS media fixtures: `nas-1` is in the intake window, `nas-only` is
+  // older and only reachable through its published media + web meta, and
+  // `nas-nometa` must never be invented into the gallery.
+  jobMetas['nas-1'] = {
+    id: 'nas-1',
+    type: 'image',
+    rail: 'B',
+    brief_id: null,
+    model: null,
+    input: null,
+    created_at: '2026-11-13T00:00:03.000Z',
+    image: DETAILS['nas-1'].image
+  }
+  jobMetas['nas-only'] = {
+    id: 'nas-only',
+    type: 'image',
+    rail: 'B',
+    brief_id: null,
+    model: null,
+    input: null,
+    created_at: '2026-11-12T00:00:00.000Z',
+    image: { mode: 't2i', prompt: '已发布旧图' }
+  }
+  const mediaRoot = path.join(dataRoot, 'media', 'jobs')
+  fs.rmSync(path.join(dataRoot, 'media'), { recursive: true, force: true })
+  const mediaFixtures: Record<string, string[]> = {
+    'nas-1': ['a.png', 'c.png'],
+    'nas-only': ['final.png'],
+    'nas-nometa': ['orphan.png']
+  }
+  for (const [job, names] of Object.entries(mediaFixtures)) {
+    fs.mkdirSync(path.join(mediaRoot, job), { recursive: true })
+    for (const [index, name] of names.entries()) {
+      const file = path.join(mediaRoot, job, name)
+      fs.writeFileSync(file, `png-${job}-${name}`)
+      const stamp = new Date(Date.parse('2026-11-13T00:00:00.000Z') + index * 1000)
+      fs.utimesSync(file, stamp, stamp)
+    }
   }
 
   // #86d: a ready upload used by the B-track (optimize) create path. The web
@@ -166,7 +214,9 @@ before(async () => {
       return
     }
     if (url.pathname === '/intake/jobs' && req.method === 'GET') {
-      sendJson(res, 200, { items: [{ id: 'img-1' }, { id: 'aigc-1' }, { id: 'img-outside' }] })
+      sendJson(res, 200, {
+        items: [{ id: 'img-1' }, { id: 'aigc-1' }, { id: 'img-outside' }, { id: 'nas-1' }]
+      })
       return
     }
     if (url.pathname === '/intake/jobs/j-err/cover') {
@@ -484,7 +534,7 @@ test('job detail keeps keyframe_asset null when the job has none', async () => {
 // gallery
 // ---------------------------------------------------------------------------
 
-test('gallery lists only image jobs and always proxies artifact URLs', async () => {
+test('gallery lists only image jobs with artifact proxies as the fallback', async () => {
   const r = await fetch(`${base}/api/studio/gallery`)
   assert.equal(r.status, 200)
   const text = await r.text()
@@ -492,8 +542,13 @@ test('gallery lists only image jobs and always proxies artifact URLs', async () 
   assert.equal(text.includes('"/studio/jobs'), false)
   assert.equal(text.includes(dataRoot), false)
   const body = JSON.parse(text) as { items: any[]; count: number; source: string }
-  assert.equal(body.count, 2)
-  assert.deepEqual(body.items.map((item) => item.id).sort(), ['img-1', 'img-outside'])
+  assert.equal(body.count, 4)
+  assert.deepEqual(body.items.map((item) => item.id).sort(), [
+    'img-1',
+    'img-outside',
+    'nas-1',
+    'nas-only'
+  ])
 
   const item = body.items.find((it) => it.id === 'img-1')
   assert.equal(item.status, 'succeeded')
@@ -510,6 +565,47 @@ test('gallery lists only image jobs and always proxies artifact URLs', async () 
   // A cover path outside jobs/<job>/output cannot be turned into a proxy URL.
   const outside = body.items.find((it) => it.id === 'img-outside')
   assert.equal(outside.cover_url, null)
+})
+
+// #159: NAS media mapping, NAS-over-artifact priority + dedupe, cover fallback.
+test('gallery prefers published NAS media and dedupes same-name artifacts', async () => {
+  const r = await fetch(`${base}/api/studio/gallery?job=nas-1`)
+  assert.equal(r.status, 200)
+  const body = (await r.json()) as { items: any[]; count: number }
+  assert.equal(body.count, 1)
+  const item = body.items[0]
+  assert.equal(item.id, 'nas-1')
+  assert.deepEqual(item.images, [
+    { name: 'c.png', url: '/api/media/jobs/nas-1/c.png' },
+    { name: 'a.png', url: '/api/media/jobs/nas-1/a.png' },
+    { name: 'b.webp', url: '/api/studio/jobs/nas-1/artifacts/b.webp' }
+  ])
+  // The explicit cover resolves to the NAS copy of the same file.
+  assert.equal(item.cover_url, '/api/media/jobs/nas-1/a.png')
+})
+
+test('gallery keeps NAS-only jobs with meta and never invents meta-less media', async () => {
+  const r = await fetch(`${base}/api/studio/gallery`)
+  const body = (await r.json()) as { items: any[] }
+  const nasOnly = body.items.find((item) => item.id === 'nas-only')
+  assert.ok(nasOnly)
+  assert.equal(nasOnly.status, 'succeeded')
+  assert.deepEqual(nasOnly.images, [
+    { name: 'final.png', url: '/api/media/jobs/nas-only/final.png' }
+  ])
+  assert.equal(nasOnly.cover_url, '/api/media/jobs/nas-only/final.png')
+  // `nas-nometa` has media but no `studio/jobs/<id>.json` → skipped.
+  assert.equal(body.items.some((item) => item.id === 'nas-nometa'), false)
+})
+
+test('gallery job filter still narrows NAS-backed results', async () => {
+  const meta = await fetch(`${base}/api/studio/gallery?job=nas-nometa`)
+  assert.equal(meta.status, 200)
+  assert.deepEqual(await meta.json(), { items: [], count: 0, source: 'studio' })
+  const only = await fetch(`${base}/api/studio/gallery?job=nas-only`)
+  const body = (await only.json()) as { items: any[]; count: number }
+  assert.equal(body.count, 1)
+  assert.equal(body.items[0].id, 'nas-only')
 })
 
 test('gallery rejects an illegal job filter with 400', async () => {
