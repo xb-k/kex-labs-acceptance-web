@@ -24,6 +24,8 @@ let web: http.Server
 let base = ''
 const hits: Array<{ method: string; url: string; body: any }> = []
 const uploadMetas: Record<string, any> = {}
+/** #165: per-job intake state so retry can see failed/canceled. */
+const jobStates: Record<string, string> = {}
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status
@@ -48,10 +50,26 @@ const ctx: StudioContext = {
   readJson: (file: string) => {
     const upload = file.match(/\/uploads\/([^/]+)\/meta\.json$/)
     if (upload) return uploadMetas[upload[1]] ?? null
-    return null
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      return null
+    }
   },
-  atomicWriteJson: () => {},
+  atomicWriteJson: (file: string, value: unknown) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(value))
+  },
   readBody
+}
+
+function jobMetaFile(id: string) {
+  return path.join(dataRoot, 'studio', 'jobs', `${id}.json`)
+}
+
+function writeJobMetaRaw(id: string, meta: Record<string, unknown>) {
+  fs.mkdirSync(path.dirname(jobMetaFile(id)), { recursive: true })
+  fs.writeFileSync(jobMetaFile(id), JSON.stringify(meta))
 }
 
 function writeUpload(id: string, name: string, ext: string, studioPath: string | null, size: number) {
@@ -123,7 +141,11 @@ before(async () => {
       return
     }
     if (/^\/intake\/jobs\/[^/]+$/.test(url.pathname) && req.method === 'GET') {
-      sendJson(res, 200, { state: 'queued', updated_at: '2026-11-14T00:00:00.000Z' })
+      const id = url.pathname.split('/').pop() ?? ''
+      sendJson(res, 200, {
+        state: jobStates[id] ?? 'queued',
+        updated_at: '2026-11-14T00:00:00.000Z'
+      })
       return
     }
     sendJson(res, 404, { error: 'not found' })
@@ -206,4 +228,52 @@ test('#165 非图片 upload → 400，且不调用 intake', async () => {
   const body = (await r.json()) as { error: string }
   assert.match(body.error, /png \/ jpg \/ jpeg \/ webp/)
   assert.equal(intakeJobPosts().length, before)
+})
+
+test('#165 keyframe-only 任务的 prompt/mode 落盘，重试 payload 仍带', async () => {
+  const body = poseVideoBody('up-pose-ok01')
+  const created = await postJob(body)
+  assert.equal(created.status, 201)
+
+  const meta = JSON.parse(fs.readFileSync(jobMetaFile('pose-video-1'), 'utf8'))
+  assert.equal(meta.prompt, body.prompt)
+  assert.equal(meta.mode, 'keyframe_only')
+  assert.deepEqual(meta.keyframe_asset, { upload_id: 'up-pose-ok01' })
+  assert.equal(meta.input, null)
+
+  jobStates['pose-video-1'] = 'failed'
+  const before = intakeJobPosts().length
+  const retry = await fetch(`${base}/api/studio/jobs/pose-video-1/retry`, { method: 'POST' })
+  assert.equal(retry.status, 201)
+  assert.equal(intakeJobPosts().length, before + 1)
+
+  const payload = intakeJobPosts().at(-1)?.body
+  assert.equal(payload.mode, 'keyframe_only')
+  assert.equal(payload.prompt, body.prompt)
+  assert.deepEqual(payload.keyframe_asset, {
+    path: '/studio/uploads/up-pose-ok01/pose-standing.png'
+  })
+  assert.equal('input' in payload, false)
+})
+
+test('#165 旧 meta 无 prompt/mode：重试回退原逻辑，不带这两个字段', async () => {
+  writeJobMetaRaw('legacy-job-1', {
+    id: 'legacy-job-1',
+    type: 'aigc',
+    rail: 'A',
+    brief_id: null,
+    model: null,
+    input: '/studio/inputs/legacy.mp4',
+    created_at: '2026-11-13T00:00:00.000Z'
+  })
+  jobStates['legacy-job-1'] = 'failed'
+  const before = intakeJobPosts().length
+  const retry = await fetch(`${base}/api/studio/jobs/legacy-job-1/retry`, { method: 'POST' })
+  assert.equal(retry.status, 201)
+  assert.equal(intakeJobPosts().length, before + 1)
+
+  const payload = intakeJobPosts().at(-1)?.body
+  assert.equal(payload.input, '/studio/inputs/legacy.mp4')
+  assert.equal('prompt' in payload, false)
+  assert.equal('mode' in payload, false)
 })

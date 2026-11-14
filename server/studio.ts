@@ -1730,7 +1730,10 @@ async function submitJob(
     upload_id: upload?.upload_id ?? null,
     nas_path: upload?.nas_path ?? null,
     image: job.type === 'image' ? (job.image ?? null) : null,
-    keyframe_asset: job.keyframe_asset ?? null
+    keyframe_asset: job.keyframe_asset ?? null,
+    // #165: keep the keyframe-only prompt/mode so retry and trace can reuse them.
+    prompt: job.prompt ?? null,
+    mode: job.mode ?? null
   })
   const detail = await callIntake(ctx, 'GET', `/intake/jobs/${encodeURIComponent(id)}`)
   const detailBody = detail.ok && detail.status === 200 ? detail.body : { state: 'queued', updated_at: nowIso() }
@@ -2116,7 +2119,10 @@ async function retryJob(ctx: StudioContext, req: IncomingMessage, res: ServerRes
     return
   }
   const meta = readJobMeta(ctx, id)
-  if (!meta?.input) {
+  // #165: keyframe-only jobs carry no source input; the stored keyframe asset
+  // is enough to rebuild the request.
+  const keyframeOnly = meta?.mode === 'keyframe_only' && Boolean(meta.keyframe_asset)
+  if (!meta || (!meta.input && !keyframeOnly)) {
     ctx.sendJson(res, 409, { error: 'retry unavailable: source input is unknown' })
     return
   }
@@ -2143,7 +2149,10 @@ async function retryJob(ctx: StudioContext, req: IncomingMessage, res: ServerRes
       model: meta.model,
       input: meta.input ?? undefined,
       image: meta.image ?? undefined,
-      keyframe_asset: meta.keyframe_asset ?? undefined
+      keyframe_asset: meta.keyframe_asset ?? undefined,
+      // #165: old metas lack these fields; `?? undefined` keeps them off the payload.
+      prompt: meta.prompt ?? undefined,
+      mode: meta.mode ?? undefined
     },
     upload
   )
