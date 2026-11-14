@@ -12,6 +12,7 @@ import { HttpError } from './api'
 import {
   EMPTY_POSE_DRAFT,
   buildPoseLibraryQuery,
+  buildPoseVideoPayload,
   createPoseEntry,
   formatPoseError,
   formatPoseSyncStatus,
@@ -25,7 +26,8 @@ import {
   validatePoseDraft,
   type PoseLibraryItem,
   type PosePayload,
-  type PoseSyncResult
+  type PoseSyncResult,
+  type PoseUsage
 } from './pose-library'
 import {
   PoseAddDialog,
@@ -568,4 +570,60 @@ test('#138 materialize 失败：错误码透出中文提示', async () => {
   } finally {
     globalThis.fetch = original
   }
+})
+
+// ---------------------------------------------------------------------------
+// #165 姿态参考 → A 轨 keyframe-only 视频
+// ---------------------------------------------------------------------------
+
+const VIDEO_POSE: PoseUsage = {
+  uploadId: 'up_pose_00000000',
+  filename: 'pose-standing.png',
+  label: '单人侧身站立'
+}
+
+test('#165 姿态视频请求体：A 轨 keyframe_only + upload_id，不带 input', () => {
+  const payload = buildPoseVideoPayload(VIDEO_POSE)
+  assert.deepEqual(payload, {
+    type: 'aigc',
+    rail: 'A',
+    mode: 'keyframe_only',
+    keyframe_asset: { upload_id: VIDEO_POSE.uploadId },
+    prompt: '参考姿态「单人侧身站立」生成一个连贯镜头，保持人物动作与构图'
+  })
+  assert.deepEqual(Object.keys(payload).sort(), [
+    'keyframe_asset',
+    'mode',
+    'prompt',
+    'rail',
+    'type'
+  ])
+  assert.equal('input' in payload, false)
+})
+
+test('#165 用作视频首帧按钮：有预览图可点，无预览图禁用，空态不渲染', () => {
+  const withPreview = html(
+    createElement(PoseLibraryGrid, {
+      items: [{ ...ITEM, preview_url: 'https://cdn.example.com/previews/pose.jpg' }],
+      onUseVideo: () => {}
+    })
+  )
+  assert.match(withPreview, /data-testid="pose-use-video"/)
+  assert.match(withPreview, /aria-label="用作视频首帧 单人侧身站立"/)
+  assert.doesNotMatch(
+    withPreview,
+    /disabled=""[^>]*data-testid="pose-use-video"|data-testid="pose-use-video"[^>]*disabled=""/
+  )
+
+  const withoutPreview = html(
+    createElement(PoseLibraryGrid, {
+      items: [{ ...ITEM, preview_url: null }],
+      onUseVideo: () => {}
+    })
+  )
+  assert.match(withoutPreview, /disabled=""[^>]*data-testid="pose-use-video"/)
+
+  const empty = html(createElement(PoseLibraryEmpty, { filtered: false }))
+  assert.match(empty, /data-testid="pose-empty"/)
+  assert.doesNotMatch(empty, /pose-use-video/)
 })

@@ -88,16 +88,20 @@ export function PoseLibraryCard({
   item,
   deleting,
   using,
+  usingVideo,
   onDelete,
   onCopy,
-  onUse
+  onUse,
+  onUseVideo
 }: {
   item: PoseLibraryItem
   deleting?: boolean
   using?: boolean
+  usingVideo?: boolean
   onDelete?: (item: PoseLibraryItem) => void
   onCopy?: (item: PoseLibraryItem) => void
   onUse?: (item: PoseLibraryItem) => void
+  onUseVideo?: (item: PoseLibraryItem) => void
 }) {
   const verified = item.license_verified
   // 预览地址失效时退回「无预览图」占位，避免卡片顶部出现破图。
@@ -200,6 +204,18 @@ export function PoseLibraryCard({
             </button>
             <button
               type="button"
+              onClick={() => onUseVideo?.(item)}
+              disabled={usingVideo || !item.preview_url}
+              title={item.preview_url ? `用「${item.label_zh}」创建 A 轨关键帧视频` : '无预览图'}
+              aria-label={`用作视频首帧 ${item.label_zh}`}
+              data-testid="pose-use-video"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-black/[0.1] px-2 text-[11px] font-medium text-apple-blueInk transition-colors hover:bg-[#EAF2FD] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Film className="h-3.5 w-3.5" />
+              {usingVideo ? '创建中…' : '用作视频首帧'}
+            </button>
+            <button
+              type="button"
               onClick={() => onCopy?.(item)}
               aria-label={`复制引用 ID ${item.id}`}
               title={item.id}
@@ -231,16 +247,20 @@ export function PoseLibraryGrid({
   items,
   deletingId,
   usingId,
+  usingVideoId,
   onDelete,
   onCopy,
-  onUse
+  onUse,
+  onUseVideo
 }: {
   items: PoseLibraryItem[]
   deletingId?: string | null
   usingId?: string | null
+  usingVideoId?: string | null
   onDelete?: (item: PoseLibraryItem) => void
   onCopy?: (item: PoseLibraryItem) => void
   onUse?: (item: PoseLibraryItem) => void
+  onUseVideo?: (item: PoseLibraryItem) => void
 }) {
   return (
     <div
@@ -253,9 +273,11 @@ export function PoseLibraryGrid({
           item={item}
           deleting={deletingId === item.id}
           using={usingId === item.id}
+          usingVideo={usingVideoId === item.id}
           onDelete={onDelete}
           onCopy={onCopy}
           onUse={onUse}
+          onUseVideo={onUseVideo}
         />
       ))}
     </div>
@@ -709,10 +731,13 @@ export function PoseSyncBar({
 
 export function PoseLibraryPanel({
   onNotify,
-  onUsePose
+  onUsePose,
+  onUseVideoKeyframe
 }: {
   onNotify?: Notify
   onUsePose?: (pose: PoseUsage) => void
+  /** #165：materialize 后交给 StudioPage 创建 A 轨 keyframe-only 任务。 */
+  onUseVideoKeyframe?: (pose: PoseUsage) => void | Promise<void>
 }) {
   const [search, setSearch] = useState('')
   const [filters, setFilters] = useState<PoseFilters>(EMPTY_POSE_FILTERS)
@@ -720,6 +745,8 @@ export function PoseLibraryPanel({
   const [confirmEntry, setConfirmEntry] = useState<PoseLibraryItem | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [usingId, setUsingId] = useState<string | null>(null)
+  const [usingVideoId, setUsingVideoId] = useState<string | null>(null)
+  const [videoError, setVideoError] = useState<string | null>(null)
   const [loadingSince, setLoadingSince] = useState<number | null>(null)
   const [syncStatus, setSyncStatus] = useState<PoseSyncResult | null>(null)
   const [syncBusy, setSyncBusy] = useState(false)
@@ -787,6 +814,26 @@ export function PoseLibraryPanel({
     [onNotify, onUsePose, usingId]
   )
 
+  /** #165 用作视频首帧：materialize 后由 StudioPage 创建 keyframe-only 任务。 */
+  const usePoseVideo = useCallback(
+    async (item: PoseLibraryItem) => {
+      if (!item.preview_url || usingVideoId) return
+      setUsingVideoId(item.id)
+      setVideoError(null)
+      try {
+        const result = await materializePoseEntry(item.id)
+        await onUseVideoKeyframe?.(poseUsageFromMaterialize(item, result))
+      } catch (err) {
+        const message = formatPoseError(err)
+        setVideoError(message)
+        onNotify?.(`创建视频任务失败：${message}`, 'err')
+      } finally {
+        setUsingVideoId(null)
+      }
+    },
+    [onNotify, onUseVideoKeyframe, usingVideoId]
+  )
+
   // 上次同步状态：失败不阻塞列表展示。
   useEffect(() => {
     let cancelled = false
@@ -829,7 +876,7 @@ export function PoseLibraryPanel({
             姿态参考库
           </h2>
           <p className="mt-1 text-[11px] leading-relaxed text-apple-subtext">
-            A 轨参考素材：先核 license 再入库，引用时复制条目 ID。
+            A 轨参考素材：先核 license 再入库；可作图片参考，也可直接用作视频首帧。
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -854,6 +901,16 @@ export function PoseLibraryPanel({
         error={syncError}
         onSync={() => void syncFromGithub()}
       />
+
+      {videoError && (
+        <p
+          className="mt-2 rounded-[10px] bg-[#FDEDEC] px-3 py-2 text-[11px] leading-relaxed text-[#B42318] ring-1 ring-inset ring-[#F3C7C4]"
+          role="alert"
+          data-testid="pose-video-error"
+        >
+          用作视频首帧失败：{videoError}
+        </p>
+      )}
 
       <div className="mt-3.5 flex flex-wrap items-center gap-2">
         <input
@@ -927,9 +984,11 @@ export function PoseLibraryPanel({
             items={items}
             deletingId={deletingId}
             usingId={usingId}
+            usingVideoId={usingVideoId}
             onDelete={openDelete}
             onCopy={(item) => void copyId(item)}
             onUse={(item) => void usePose(item)}
+            onUseVideo={(item) => void usePoseVideo(item)}
           />
         )}
       </div>

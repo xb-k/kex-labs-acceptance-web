@@ -126,6 +126,14 @@ export interface JobSummary {
   duration_ms: number | null
 }
 
+/** #165: keyframe may come from a job output (`source_job/name`), a ready
+ * upload (`upload_id`, resolved server-side) or a staged studio path. A browser
+ * never supplies `path` directly. */
+export type KeyframeAsset =
+  | { source_job: string; name: string }
+  | { upload_id: string }
+  | { path: string }
+
 interface JobMeta {
   id: string
   type: JobType
@@ -138,7 +146,10 @@ interface JobMeta {
   nas_path?: string | null
   /** #89b: stored so an image job can be retried without re-entering params. */
   image?: ImageInput | null
-  keyframe_asset?: { source_job: string; name: string } | null
+  keyframe_asset?: KeyframeAsset | null
+  /** #165: keyframe-only prompt (pose label + scene), kept for retry/trace. */
+  prompt?: string | null
+  mode?: 'keyframe_only' | null
 }
 
 /** Everything this module needs from api.ts (avoids a circular import). */
@@ -178,6 +189,8 @@ const FULL_VIDEO_KINDS = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.webm'])
 const IMAGE_KINDS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 /** #89b: mirrors `intake.py` IMAGE_SIZES / IMAGE_MODES exactly. */
 const IMAGE_SIZES = new Set(['1536x864', '864x1536', '1024x1024'])
+/** #165: same ceiling as the upload endpoint for a pose keyframe. */
+const KEYFRAME_MAX_BYTES = 15 * 1024 * 1024
 const IMAGE_MODES = new Set<ImageMode>(['t2i', 'edit'])
 const AUDIO_KINDS = new Set(['.wav', '.mp3', '.flac'])
 const SUBTITLE_KINDS = new Set(['.srt', '.vtt'])
@@ -1363,8 +1376,59 @@ type CreateJobInput = {
   upload_id?: string
   nas_path?: string
   image?: ImageInput
-  /** #89b: injected C-stage keyframe for the next A-track job (shot 1 only). */
-  keyframe_asset?: { source_job: string; name: string }
+  /** #89b/#165: injected C-stage keyframe or keyframe-only base frame. */
+  keyframe_asset?: KeyframeAsset
+  /** #165: keyframe-only prompt (pose label + scene). */
+  prompt?: string
+  mode?: 'keyframe_only'
+}
+
+/** #165: staged studio paths are server-side, but never accept traversal. */
+function isSafeStudioPath(raw: unknown): raw is string {
+  if (typeof raw !== 'string' || !raw || raw.includes('\0')) return false
+  const normalised = raw.replace(/\\/g, '/')
+  if (!path.posix.isAbsolute(normalised)) return false
+  return !normalised.split('/').includes('..')
+}
+
+type KeyframeUploadCheck =
+  | { ok: true; ready: Extract<ReadyUpload, { ok: true }> }
+  | { ok: false; status: number; error: string }
+
+/** #165: an upload may stand in for the keyframe only when it is a ready,
+ * reasonably-sized image with a staged studio path. */
+function checkKeyframeUpload(ctx: StudioContext, uploadId: string): KeyframeUploadCheck {
+  if (!UPLOAD_ID_RE.test(uploadId)) {
+    return { ok: false, status: 400, error: 'keyframe_asset.upload_id: 非法' }
+  }
+  const ready = readReadyUpload(ctx, uploadId)
+  if (!ready.ok) return ready
+  if (!IMAGE_KINDS.has(path.extname(ready.name).toLowerCase())) {
+    return { ok: false, status: 400, error: 'keyframe_asset.upload_id: 仅支持 png / jpg / jpeg / webp' }
+  }
+  if (ready.size > KEYFRAME_MAX_BYTES) {
+    return { ok: false, status: 400, error: 'keyframe_asset.upload_id: 图片超过 15MB' }
+  }
+  if (ready.studioPath !== null && !isSafeStudioPath(ready.studioPath)) {
+    return { ok: false, status: 400, error: 'keyframe_asset.upload_id: studio 路径非法' }
+  }
+  return { ok: true, ready }
+}
+
+/** Resolves the requested upload to the staged studio path intake accepts.
+ * Falls back to the existing `/intake/uploads` stage when the meta has none. */
+async function resolveKeyframeUploadPath(
+  ctx: StudioContext,
+  uploadId: string
+): Promise<{ ok: true; path: string } | { ok: false; status: number; error: string }> {
+  const checked = checkKeyframeUpload(ctx, uploadId)
+  if (!checked.ok) return checked
+  if (checked.ready.studioPath) return { ok: true, path: checked.ready.studioPath }
+  const forwarded = await forwardUploadToStudio(ctx, uploadId, checked.ready)
+  if (!forwarded.ok) {
+    return { ok: false, status: 502, error: `studio_upload_unavailable: ${forwarded.reason}` }
+  }
+  return { ok: true, path: forwarded.path }
 }
 
 function validateCreateJob(
@@ -1492,23 +1556,56 @@ function validateCreateJob(
   }
   // #89b: keyframe injection is scoped to `{source_job, name}` — a browser
   // never supplies an absolute studio path.
-  let keyframeAsset: { source_job: string; name: string } | undefined
+  // #165: `{upload_id}` is also accepted and resolved server-side to a staged
+  // `{path}` before intake sees it.
+  let keyframeAsset: KeyframeAsset | undefined
   if (hasKey(body, 'keyframe_asset') && body.keyframe_asset !== null) {
     const k = body.keyframe_asset
-    const name = isPlainObject(k) ? k.name : null
-    if (
-      !isPlainObject(k) ||
-      typeof k.source_job !== 'string' ||
-      !JOB_NAME_RE.test(k.source_job) ||
-      typeof name !== 'string' ||
-      !name ||
-      path.basename(name) !== name ||
-      name.startsWith('.') ||
-      !IMAGE_KINDS.has(path.extname(name).toLowerCase())
-    ) {
-      return { ok: false, status: 400, error: 'keyframe_asset: 需为 {source_job, name} 且 name 为图片文件名' }
+    if (!isPlainObject(k)) {
+      return { ok: false, status: 400, error: 'keyframe_asset: 需为 {source_job, name} 或 {upload_id}' }
     }
-    keyframeAsset = { source_job: k.source_job, name }
+    if (hasKey(k, 'upload_id')) {
+      if (hasKey(k, 'source_job') || hasKey(k, 'name') || hasKey(k, 'path')) {
+        return { ok: false, status: 400, error: 'keyframe_asset: upload_id 与 source_job/name/path 互斥' }
+      }
+      if (typeof k.upload_id !== 'string') {
+        return { ok: false, status: 400, error: 'keyframe_asset.upload_id: 非法' }
+      }
+      const checked = checkKeyframeUpload(ctx, k.upload_id)
+      if (!checked.ok) return { ok: false, status: checked.status, error: checked.error }
+      keyframeAsset = { upload_id: k.upload_id }
+    } else {
+      const name = k.name
+      if (
+        typeof k.source_job !== 'string' ||
+        !JOB_NAME_RE.test(k.source_job) ||
+        typeof name !== 'string' ||
+        !name ||
+        path.basename(name) !== name ||
+        name.startsWith('.') ||
+        !IMAGE_KINDS.has(path.extname(name).toLowerCase())
+      ) {
+        return { ok: false, status: 400, error: 'keyframe_asset: 需为 {source_job, name} 且 name 为图片文件名' }
+      }
+      keyframeAsset = { source_job: k.source_job, name }
+    }
+  }
+  let prompt: string | undefined
+  if (hasKey(body, 'prompt') && body.prompt !== null) {
+    if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 500) {
+      return { ok: false, status: 400, error: 'prompt: 需为 1..500 字符' }
+    }
+    prompt = body.prompt.trim()
+  }
+  let mode: 'keyframe_only' | undefined
+  if (hasKey(body, 'mode') && body.mode !== null) {
+    if (body.mode !== 'keyframe_only') {
+      return { ok: false, status: 400, error: 'mode: 仅支持 keyframe_only' }
+    }
+    if (!keyframeOnly) {
+      return { ok: false, status: 400, error: 'mode=keyframe_only 需要 rail=A + keyframe_asset 且无 input' }
+    }
+    mode = 'keyframe_only'
   }
   return {
     ok: true,
@@ -1520,7 +1617,9 @@ function validateCreateJob(
       model,
       input,
       upload_id: uploadId,
-      keyframe_asset: keyframeAsset
+      keyframe_asset: keyframeAsset,
+      prompt,
+      mode
     }
   }
 }
@@ -1554,7 +1653,22 @@ async function submitJob(
     payload.job = job.id
   }
   if (job.type !== 'image' && job.keyframe_asset) {
-    payload.keyframe_asset = job.keyframe_asset
+    // #165: resolve upload_id → staged `{path}` (never leak the upload path to
+    // the browser; intake only accepts path / source_job+name).
+    if ('upload_id' in job.keyframe_asset) {
+      const resolved = await resolveKeyframeUploadPath(ctx, job.keyframe_asset.upload_id)
+      if (!resolved.ok) {
+        ctx.sendJson(res, resolved.status, { error: resolved.error })
+        return
+      }
+      payload.keyframe_asset = { path: resolved.path }
+    } else {
+      payload.keyframe_asset = job.keyframe_asset
+    }
+  }
+  if (job.type !== 'image') {
+    if (job.mode) payload.mode = job.mode
+    if (job.prompt) payload.prompt = job.prompt
   }
   // #98 I1: forward the confirmed Brief so intake can persist jobs/<job>/brief.json
   // and stage A can consume logline/script/shot prompts. Without brief_id the
@@ -1624,7 +1738,15 @@ async function submitJob(
 }
 
 type ReadyUpload =
-  | { ok: true; name: string; sha256: string; sourcePath: string; size: number }
+  | {
+      ok: true
+      name: string
+      sha256: string
+      sourcePath: string
+      size: number
+      /** #165: staged studio path written by `uploads.ts` (may be absent). */
+      studioPath: string | null
+    }
   | { ok: false; status: number; error: string }
 
 /** Reads the NAS upload record written by `uploads.ts`; must be `status=ready`. */
@@ -1647,7 +1769,8 @@ function readReadyUpload(ctx: StudioContext, uploadId: string): ReadyUpload {
   try {
     const stat = fs.statSync(sourcePath)
     if (!stat.isFile()) return { ok: false, status: 409, error: 'upload source missing' }
-    return { ok: true, name, sha256, sourcePath, size: stat.size }
+    const studioPath = typeof meta.studio_path === 'string' && meta.studio_path ? meta.studio_path : null
+    return { ok: true, name, sha256, sourcePath, size: stat.size, studioPath }
   } catch {
     return { ok: false, status: 409, error: 'upload source missing' }
   }

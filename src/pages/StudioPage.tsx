@@ -17,6 +17,7 @@ import { formatClockMs, formatSizeBytes } from '../format'
 import { useToast } from '../hooks'
 import { KEYFRAME_ONLY_HINT, buildAigcJobPayload, hasAigcSource } from '../image-workbench'
 import type { PoseUsage } from '../pose-library'
+import { buildPoseVideoPayload } from '../pose-library'
 import { buildOptimizeJobPayload, type UploadProbeResponse } from '../studio-probe'
 import type {
   StudioBrief,
@@ -423,6 +424,17 @@ export function StudioPage() {
     setKeyframeAsset(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }, [applySession])
+
+  /** #165：姿态参考 → A 轨 keyframe-only 视频；成功后跳到该 job。 */
+  async function handleUseVideoKeyframe(pose: PoseUsage) {
+    const job = await postJson<StudioJob>('/api/studio/jobs', buildPoseVideoPayload(pose))
+    setNotice(`已用姿态「${pose.label}」创建 A 轨关键帧任务 ${job.id}。`)
+    setCreatedJobId(job.id)
+    setCreatedStartedAt(Date.now())
+    updateSearchParams({ job: job.id })
+    jobs.refresh()
+    showToast(`已提交视频任务 ${job.id}`)
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -895,6 +907,7 @@ export function StudioPage() {
             <PoseLibraryPanel
               onNotify={(msg, tone) => showToast(msg, tone ?? 'ok')}
               onUsePose={setPoseUpload}
+              onUseVideoKeyframe={handleUseVideoKeyframe}
             />
           </div>
         </div>

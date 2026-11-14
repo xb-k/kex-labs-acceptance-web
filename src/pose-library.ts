@@ -297,6 +297,38 @@ export function poseUsageFromMaterialize(
   return { uploadId: result.upload_id, filename: result.filename, label: item.label_zh }
 }
 
+/** #165 姿态图 → 视频首帧：A 轨 keyframe-only 请求体。 */
+export type PoseVideoPayload = {
+  type: 'aigc'
+  rail: 'A'
+  mode: 'keyframe_only'
+  keyframe_asset: { upload_id: string }
+  prompt: string
+}
+
+/** 默认镜头提示词：姿态标签 + 基础动作/构图约束（服务端限 1..500 字）。 */
+export function poseVideoPrompt(pose: PoseUsage, scene?: string): string {
+  const extra = (scene ?? '').trim()
+  const base = extra
+    ? `参考姿态「${pose.label}」：${extra}`
+    : `参考姿态「${pose.label}」生成一个连贯镜头，保持人物动作与构图`
+  return base.slice(0, 500)
+}
+
+/**
+ * #165：从已 materialize 的姿态 upload 构造 keyframe-only I2V 请求体。
+ * 视觉素材只以 `upload_id` 出现，studio 路径由服务端解析。
+ */
+export function buildPoseVideoPayload(pose: PoseUsage, scene?: string): PoseVideoPayload {
+  return {
+    type: 'aigc',
+    rail: 'A',
+    mode: 'keyframe_only',
+    keyframe_asset: { upload_id: pose.uploadId },
+    prompt: poseVideoPrompt(pose, scene)
+  }
+}
+
 /**
  * #138 把姿态预览图落成 studio upload；成功后返回值可直接作为
  * ImageWorkbench 的 source_upload_id。失败抛 HttpError（error 为预览/暂存错误码）。
