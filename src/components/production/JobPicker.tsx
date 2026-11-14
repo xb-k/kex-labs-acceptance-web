@@ -95,16 +95,142 @@ export function enrichAndFilterJobs(
   // Sort newest first by updatedAt timestamp
   enriched.sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''))
 
+  return enriched.filter(
+    (item) => matchesFilter(item.status, statusFilter) && jobMatchesQuery(item, query)
+  )
+}
+
+export function jobMatchesQuery(item: EnrichedJobItem, query: string): boolean {
   const needle = query.trim().toLowerCase()
-  return enriched.filter((item) => {
-    if (!matchesFilter(item.status, statusFilter)) return false
-    if (!needle) return true
-    return (
-      item.id.toLowerCase().includes(needle) ||
-      item.title.toLowerCase().includes(needle) ||
-      item.statusLabel.toLowerCase().includes(needle)
-    )
-  })
+  if (!needle) return true
+  return (
+    item.id.toLowerCase().includes(needle) ||
+    item.title.toLowerCase().includes(needle) ||
+    item.statusLabel.toLowerCase().includes(needle)
+  )
+}
+
+/** #96：activeOnly 下拉里附带的「已结束 · 历史查看」项，不参与活跃计数。 */
+export const HISTORY_VIEW_BADGE = '已结束 · 历史查看'
+
+/**
+ * #96：总台只追踪活跃任务，但 URL `?job=<历史 id>` 仍需可查看。
+ * 选中的非活跃任务作为单独一项追加到 cycleList 末尾，避免下拉计数为 0 / 空白。
+ */
+export function selectCycleJobs(
+  allSorted: EnrichedJobItem[],
+  activeItems: EnrichedJobItem[],
+  selectedJobId: string | null,
+  activeOnly: boolean
+): { cycleList: EnrichedJobItem[]; selectedHistoryItem: EnrichedJobItem | null } {
+  if (!activeOnly) return { cycleList: allSorted, selectedHistoryItem: null }
+  const selected = selectedJobId
+    ? allSorted.find((item) => item.id === selectedJobId) ?? null
+    : null
+  const selectedHistoryItem =
+    selected && !isActiveJobStatus(selected.status) ? selected : null
+  return {
+    cycleList: selectedHistoryItem ? [...activeItems, selectedHistoryItem] : activeItems,
+    selectedHistoryItem
+  }
+}
+
+export type JobPickerModel = {
+  allSorted: EnrichedJobItem[]
+  activeList: EnrichedJobItem[]
+  cycleList: EnrichedJobItem[]
+  filtered: EnrichedJobItem[]
+  selectedHistoryItem: EnrichedJobItem | null
+  activeCount: number
+  doneCount: number
+  staleCount: number
+  unknownCount: number
+  attentionCount: number
+  emptyMessage: string
+}
+
+export function buildJobPickerModel(
+  jobs: FlowJobSummary[],
+  deliveries: Delivery[],
+  selectedJobId: string | null,
+  activeOnly: boolean,
+  query = '',
+  statusFilter: JobStatusFilter = 'all'
+): JobPickerModel {
+  const allSorted = enrichAndFilterJobs(jobs, deliveries, '', 'all')
+  const activeList = allSorted.filter((item) => isActiveJobStatus(item.status))
+  const { cycleList, selectedHistoryItem } = selectCycleJobs(
+    allSorted,
+    activeList,
+    selectedJobId,
+    activeOnly
+  )
+
+  const baseFiltered = enrichAndFilterJobs(
+    jobs,
+    deliveries,
+    query,
+    activeOnly ? 'active' : statusFilter
+  )
+  const filtered =
+    activeOnly &&
+    selectedHistoryItem &&
+    jobMatchesQuery(selectedHistoryItem, query) &&
+    !baseFiltered.some((item) => item.id === selectedHistoryItem.id)
+      ? [...baseFiltered, selectedHistoryItem]
+      : baseFiltered
+
+  const activeCount = activeList.length
+  const doneCount = allSorted.filter((item) => item.status === 'succeeded').length
+  const staleCount = allSorted.filter((item) => item.status === 'stale').length
+  const unknownCount = allSorted.filter((item) => item.status === 'unknown').length
+  const emptyMessage =
+    activeOnly && activeCount === 0 && !selectedHistoryItem
+      ? '当前没有正在渲染或执行中的任务'
+      : '没有匹配当前搜索条件的活跃任务'
+
+  return {
+    allSorted,
+    activeList,
+    cycleList,
+    filtered,
+    selectedHistoryItem,
+    activeCount,
+    doneCount,
+    staleCount,
+    unknownCount,
+    attentionCount: allSorted.length - activeCount - doneCount,
+    emptyMessage
+  }
+}
+
+export type TrackerHeadline = {
+  isActive: boolean
+  historyView: boolean
+  headline: string
+}
+
+/**
+ * #96：总台头部只显示活跃任务；`?job=` 指向已完成 / 不存在时不冒充「正在渲染」，
+ * 改为明确的历史查看状态。
+ */
+export function resolveTrackerHeadline(
+  jobs: FlowJobSummary[],
+  selectedJobId: string | null | undefined,
+  loading: boolean
+): TrackerHeadline {
+  const summary = selectedJobId
+    ? jobs.find((item) => item.id === selectedJobId) ?? null
+    : null
+  const isActive = summary ? isActiveJobStatus(resolveJobDisplayStatus(summary)) : false
+  if (isActive && summary) {
+    return { isActive: true, historyView: false, headline: summary.id }
+  }
+  return {
+    isActive: false,
+    historyView: Boolean(selectedJobId) && !loading,
+    headline: loading ? '读取中…' : '当前无渲染中任务'
+  }
 }
 
 function statusDotClass(status: JobDisplayStatus): string {
@@ -140,18 +266,20 @@ export function JobPicker({
   const containerRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
 
-  const allSorted = useMemo(
-    () => enrichAndFilterJobs(jobs, deliveries, '', 'all'),
-    [jobs, deliveries]
-  )
-
-  const activeList = useMemo(() => allSorted.filter((j) => isActiveJobStatus(j.status)), [allSorted])
-  const cycleList = activeOnly ? activeList : allSorted
-
-  const filtered = useMemo(
-    () =>
-      enrichAndFilterJobs(jobs, deliveries, query, activeOnly ? 'active' : statusFilter),
-    [jobs, deliveries, query, activeOnly, statusFilter]
+  const {
+    allSorted,
+    cycleList,
+    filtered,
+    selectedHistoryItem,
+    activeCount,
+    doneCount,
+    staleCount,
+    unknownCount,
+    attentionCount,
+    emptyMessage
+  } = useMemo(
+    () => buildJobPickerModel(jobs, deliveries, selectedJobId, activeOnly, query, statusFilter),
+    [jobs, deliveries, selectedJobId, activeOnly, query, statusFilter]
   )
 
   const activeIndex = useMemo(() => {
@@ -160,12 +288,6 @@ export function JobPicker({
   }, [cycleList, selectedJobId])
 
   const activeItem = cycleList[activeIndex] ?? null
-
-  const activeCount = activeList.length
-  const doneCount = allSorted.filter((j) => j.status === 'succeeded').length
-  const staleCount = allSorted.filter((j) => j.status === 'stale').length
-  const unknownCount = allSorted.filter((j) => j.status === 'unknown').length
-  const attentionCount = allSorted.length - activeCount - doneCount
 
   useEffect(() => {
     if (!open) return
@@ -239,6 +361,11 @@ export function JobPicker({
                   ? '读取视频任务…'
                   : '暂无正在渲染的任务'}
             </span>
+            {activeItem && !isActiveJobStatus(activeItem.status) && (
+              <span className="shrink-0 rounded bg-[#F5F5F7] px-1 py-0.5 text-[9.5px] font-medium text-apple-subtext">
+                已结束
+              </span>
+            )}
           </span>
           <span className="flex shrink-0 items-center gap-1 text-[11px] text-apple-subtext">
             <span className="num">
@@ -300,6 +427,14 @@ export function JobPicker({
                   <span aria-hidden="true">·</span>
                   <span>状态未知 {unknownCount}</span>
                 </div>
+                {selectedHistoryItem && (
+                  <div
+                    data-testid="production-job-picker-history-note"
+                    className="text-[11px] text-apple-subtext"
+                  >
+                    另附历史查看 1（{selectedHistoryItem.id}）· 不计入活跃队列
+                  </div>
+                )}
               </div>
             ) : (
               <div className="mt-2 space-y-1.5 text-[11px]">
@@ -340,11 +475,7 @@ export function JobPicker({
             {filtered.length === 0 ? (
               <li className="flex flex-col items-center justify-center px-4 py-8 text-center">
                 <Film className="h-5 w-5 text-apple-subtext/60" />
-                <p className="mt-1.5 text-xs text-apple-subtext">
-                  {activeOnly && activeCount === 0
-                    ? '当前没有正在渲染或执行中的任务'
-                    : '没有匹配当前搜索条件的活跃任务'}
-                </p>
+                <p className="mt-1.5 text-xs text-apple-subtext">{emptyMessage}</p>
                 {activeOnly && doneCount > 0 && (
                   <Link
                     to="/deliveries"
@@ -358,12 +489,14 @@ export function JobPicker({
             ) : (
               filtered.map((item) => {
                 const isSelected = item.id === activeItem?.id
+                const isHistoryView = activeOnly && !isActiveJobStatus(item.status)
                 return (
                   <li key={item.id}>
                     <button
                       type="button"
                       role="option"
                       aria-selected={isSelected}
+                      data-history-view={isHistoryView || undefined}
                       onClick={() => {
                         onSelectJob(item.id)
                         setOpen(false)
@@ -380,6 +513,11 @@ export function JobPicker({
                           <span className="truncate text-[12.5px] font-medium text-apple-text">
                             {item.title}
                           </span>
+                          {isHistoryView && (
+                            <span className="shrink-0 rounded-full bg-[#F5F5F7] px-1.5 py-0.5 text-[9.5px] font-medium text-apple-subtext">
+                              {HISTORY_VIEW_BADGE}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-0.5 flex items-center gap-2 text-[10.5px] text-apple-subtext">
                           <span className="truncate font-mono">{item.id}</span>

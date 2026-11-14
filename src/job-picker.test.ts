@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  buildJobPickerModel,
   enrichAndFilterJobs,
+  HISTORY_VIEW_BADGE,
   JOB_STATUS_LABEL,
   jobStatusHint,
-  resolveJobDisplayStatus
+  resolveJobDisplayStatus,
+  resolveTrackerHeadline
 } from './components/production/JobPicker'
 import type { Delivery, FlowJobSummary } from './types'
 
@@ -155,4 +158,80 @@ test('status labels and source hints never claim an unknown job is rendering', (
     updated_at: '2026-11-13T10:00:00Z'
   })
   assert.ok(stateHint.includes('状态文件'))
+})
+
+/* #96 总台活跃任务一致性：选中历史任务时下拉不再空白，但不得计入活跃。 */
+
+test('#96 活跃 + 选中历史：下拉为两项，历史在末尾、用真实状态', () => {
+  const model = buildJobPickerModel(MOCK_JOBS, MOCK_DELIVERIES, '20261112_coffee_ad_001', true)
+  assert.equal(model.cycleList.length, 2)
+  assert.equal(model.cycleList[0].id, '20261113_vlog_cafe_002')
+  assert.equal(model.cycleList[1].id, '20261112_coffee_ad_001')
+  assert.equal(model.selectedHistoryItem?.id, '20261112_coffee_ad_001')
+  assert.equal(model.selectedHistoryItem?.status, 'succeeded')
+  assert.equal(model.selectedHistoryItem?.statusLabel, '已完成')
+  assert.equal(HISTORY_VIEW_BADGE, '已结束 · 历史查看')
+  // 下拉列表同样包含这一项，避免 activeOnly 下拉为空。
+  assert.deepEqual(
+    model.filtered.map((item) => item.id),
+    ['20261113_vlog_cafe_002', '20261112_coffee_ad_001']
+  )
+})
+
+test('#96 活跃计数只算活跃任务，历史项不参与', () => {
+  const model = buildJobPickerModel(MOCK_JOBS, MOCK_DELIVERIES, '20261112_coffee_ad_001', true)
+  assert.equal(model.activeCount, 1)
+  assert.equal(model.doneCount, 1)
+  assert.equal(model.staleCount, 1)
+  assert.equal(model.attentionCount, MOCK_JOBS.length - model.activeCount - model.doneCount)
+})
+
+test('#96 头部不冒充活跃：历史 / 不存在的 ?job= 都不显示为渲染中', () => {
+  const history = resolveTrackerHeadline(MOCK_JOBS, '20261112_coffee_ad_001', false)
+  assert.deepEqual(history, {
+    isActive: false,
+    historyView: true,
+    headline: '当前无渲染中任务'
+  })
+
+  const missing = resolveTrackerHeadline(MOCK_JOBS, '20260101_not_exist', false)
+  assert.equal(missing.isActive, false)
+  assert.equal(missing.historyView, true)
+  assert.equal(missing.headline, '当前无渲染中任务')
+
+  const active = resolveTrackerHeadline(MOCK_JOBS, '20261113_vlog_cafe_002', false)
+  assert.deepEqual(active, {
+    isActive: true,
+    historyView: false,
+    headline: '20261113_vlog_cafe_002'
+  })
+
+  const loading = resolveTrackerHeadline(MOCK_JOBS, '20261112_coffee_ad_001', true)
+  assert.equal(loading.headline, '读取中…')
+  assert.equal(loading.historyView, false)
+})
+
+test('#96 空态只在无活跃且无选中历史时提示', () => {
+  const none = buildJobPickerModel([], MOCK_DELIVERIES, null, true)
+  assert.equal(none.filtered.length, 0)
+  assert.equal(none.emptyMessage, '当前没有正在渲染或执行中的任务')
+
+  const allHistory = buildJobPickerModel(
+    [MOCK_JOBS[0]],
+    MOCK_DELIVERIES,
+    null,
+    true
+  )
+  assert.equal(allHistory.filtered.length, 0)
+  assert.equal(allHistory.emptyMessage, '当前没有正在渲染或执行中的任务')
+
+  const pickedHistory = buildJobPickerModel(
+    [MOCK_JOBS[0]],
+    MOCK_DELIVERIES,
+    '20261112_coffee_ad_001',
+    true
+  )
+  assert.equal(pickedHistory.activeCount, 0)
+  assert.equal(pickedHistory.filtered.length, 1)
+  assert.equal(pickedHistory.emptyMessage, '没有匹配当前搜索条件的活跃任务')
 })

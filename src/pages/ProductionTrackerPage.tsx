@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { HttpError, postJson, useLiveJson, useSystem } from '../api'
 import { DailyEfficiencyCard } from '../components/production/DailyEfficiencyCard'
-import { enrichAndFilterJobs, JobPicker } from '../components/production/JobPicker'
+import {
+  enrichAndFilterJobs,
+  JobPicker,
+  resolveTrackerHeadline
+} from '../components/production/JobPicker'
 import { ShotAgentMatrix } from '../components/production/ShotAgentMatrix'
 import { StageNodeTrack } from '../components/production/StageNodeTrack'
 import {
@@ -112,6 +116,14 @@ export function ProductionTrackerPage() {
   const activeRenderingJobs = useMemo(
     () => enrichAndFilterJobs(jobs, deliveries, '', 'active'),
     [jobs, deliveries]
+  )
+
+  // #96：头部只认活跃任务；`?job=` 指向已完成 / 不存在的任务时按历史查看处理，
+  // 不再把历史 job.id 冒充成「当前正在渲染」。
+  const trackerJobId = job?.id ?? selectedJobId
+  const tracker = useMemo(
+    () => resolveTrackerHeadline(jobs, trackerJobId, flow.status === 'loading'),
+    [jobs, trackerJobId, flow.status]
   )
 
   useEffect(() => {
@@ -291,9 +303,19 @@ export function ProductionTrackerPage() {
             <span aria-hidden="true">·</span>
             <span>仅追踪当前正在渲染 / 执行中的活跃任务（历史成片请在「任务中心 / 交付与资产」查看）</span>
           </div>
-          <h1 className="mt-1 text-[28px] font-semibold tracking-[-0.024em] text-apple-text sm:text-[32px]">
-            视频生产总台
-          </h1>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <h1 className="text-[28px] font-semibold tracking-[-0.024em] text-apple-text sm:text-[32px]">
+              视频生产总台
+            </h1>
+            {tracker.historyView && (
+              <span
+                data-testid="production-history-view-badge"
+                className="rounded-full bg-[#F5F5F7] px-2.5 py-0.5 text-[11px] font-medium text-apple-subtext"
+              >
+                历史查看{trackerJobId ? ` · ${trackerJobId}` : ''}
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -480,17 +502,18 @@ export function ProductionTrackerPage() {
             <span>当前正在渲染 / 执行</span>
             <Film className="h-4 w-4 text-[#C77700]" />
           </div>
-          <div className="mt-2 truncate text-[13.5px] font-semibold text-apple-text" title={job?.id}>
-            {activeRenderingJobs.length > 0 && job
-              ? job.id
-              : flow.status === 'loading'
-                ? '读取中…'
-                : '当前无渲染中任务'}
+          <div className="mt-2 truncate text-[13.5px] font-semibold text-apple-text" title={tracker.isActive ? tracker.headline : undefined}>
+            {tracker.headline}
           </div>
           <p className="num mt-auto pt-3 text-[11px] text-apple-subtext">
-            活跃队列 {activeRenderingJobs.length} 支 · 模板{' '}
-            {String((job?.profile as Record<string, unknown> | null)?.name ?? 'ad_teal_orange')} ·{' '}
-            {job?.shots?.length ?? 0} 镜头
+            活跃队列 {activeRenderingJobs.length} 支
+            {tracker.isActive && job ? (
+              <>
+                {' · '}模板{' '}
+                {String((job.profile as Record<string, unknown> | null)?.name ?? 'ad_teal_orange')} ·{' '}
+                {job.shots?.length ?? 0} 镜头
+              </>
+            ) : null}
           </p>
         </div>
       </section>
