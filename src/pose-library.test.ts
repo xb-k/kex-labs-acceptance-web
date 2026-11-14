@@ -22,6 +22,7 @@ import {
   type PosePayload
 } from './pose-library'
 import {
+  PoseAddDialog,
   PoseLibraryEmpty,
   PoseLibraryGrid,
   PoseLibraryPanel
@@ -331,4 +332,62 @@ test('#138 删除：DELETE /api/pose-library/:id；401 鉴权失败可区分', a
   } finally {
     globalThis.fetch = original
   }
+})
+
+// ---------------------------------------------------------------------------
+// #138 回归：下拉统一 / 窄栏溢出（SSR 类名契约）
+// ---------------------------------------------------------------------------
+
+test('#138 筛选下拉统一用 SelectMenu：没有原生 select，保留 aria/testId/size', () => {
+  const markup = html(createElement(PoseLibraryPanel, {}))
+  assert.doesNotMatch(markup, /<select[\s>]/)
+  for (const [testId, label] of [
+    ['pose-filter-license', '按 license 筛选'],
+    ['pose-filter-shot', '按适用镜头筛选']
+  ] as const) {
+    const trigger = markup.match(new RegExp(`<button[^>]*data-testid="${testId}"[^>]*>`))?.[0]
+    assert.ok(trigger, `${testId} 触发器应渲染为 SelectMenu 的 button`)
+    assert.match(trigger, /role="combobox"/)
+    assert.match(trigger, /aria-haspopup="listbox"/)
+    assert.match(trigger, /aria-expanded="false"/)
+    assert.match(trigger, new RegExp(`aria-label="${label}"`))
+    assert.match(trigger, /data-select-size="sm"/)
+    const box = markup.match(new RegExp(`<div[^>]*min-w-\\[132px\\][^>]*>(?=[\\s\\S]*data-testid="${testId}")`))?.[0]
+    assert.ok(box, `${testId} 外层需限制最小宽度`)
+  }
+})
+
+test('#138 添加弹窗 License 用 SelectMenu（md + 占位「选择协议」），错误行保留', () => {
+  const markup = html(
+    createElement(PoseAddDialog, { open: true, onClose: () => {}, onCreated: () => {} })
+  )
+  assert.doesNotMatch(markup, /<select[\s>]/)
+  const trigger = markup.match(/<button[^>]*data-testid="pose-add-license"[^>]*>/)?.[0]
+  assert.ok(trigger)
+  assert.match(trigger, /id="pose-add-license"/)
+  assert.match(trigger, /role="combobox"/)
+  assert.match(trigger, /data-select-size="md"/)
+  assert.match(markup, /选择协议/)
+})
+
+test('#138 卡片窄栏不溢出：min-w-0/overflow-hidden/break-all/break-words', () => {
+  const long = {
+    ...ITEM,
+    preview_url: 'https://cdn.example.com/previews/' + 'x'.repeat(120) + '.jpg',
+    source_url: 'https://example.com/' + 'very-long-path-segment/'.repeat(8),
+    tags: ['标签'.repeat(30), 'a'.repeat(80)]
+  } as PoseLibraryItem
+  const markup = html(createElement(PoseLibraryGrid, { items: [long] }))
+  assert.match(markup, /<article class="[^"]*min-w-0[^"]*overflow-hidden[^"]*" data-testid="pose-card"/)
+  assert.match(markup, /<span class="[^"]*break-all[^"]*" data-testid="pose-source-url"/)
+  assert.match(markup, /class="num max-w-\[50%\] shrink-0 truncate[^"]*">CC-BY-4\.0</)
+  assert.match(markup, /<div class="[^"]*flex-wrap[^"]*" data-testid="pose-shots"/)
+  assert.match(markup, /<p class="[^"]*break-words[^"]*">#/)
+  assert.match(markup, /loading="lazy"/)
+})
+
+test('#138 grid 断点：父容器窄时单列，lg 两列，2xl 三列', () => {
+  const markup = html(createElement(PoseLibraryGrid, { items: [ITEM] }))
+  assert.match(markup, /class="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3" data-testid="pose-grid"/)
+  assert.doesNotMatch(markup, /(^|[\s"])sm:grid-cols-2|(^|[\s"])xl:grid-cols-3/)
 })

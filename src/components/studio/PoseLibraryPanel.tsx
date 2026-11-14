@@ -31,8 +31,28 @@ import {
   type PoseShot
 } from '../../pose-library'
 import { Close, Copy, ExternalLink, Film, Plus, Refresh, Trash } from '../icons'
+import { SelectMenu, type SelectMenuOption } from '../SelectMenu'
 import { Field, inputClass, primaryButton, quietButton } from '../studio-ui'
 import { AsyncStatusLine } from '../ui'
+
+// 全站统一用 SelectMenu（原生 <select> 在窄容器里会被裁切、与其余下拉不一致）。
+const LICENSE_FILTER_OPTIONS: SelectMenuOption[] = [
+  { value: '', label: '全部协议' },
+  ...POSE_LICENSES.map((license) => ({ value: license, label: license }))
+]
+
+const SHOT_FILTER_OPTIONS: SelectMenuOption[] = [
+  { value: '', label: '全部镜头' },
+  ...POSE_SHOT_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))
+]
+
+const LICENSE_OPTIONS: SelectMenuOption[] = POSE_LICENSES.map((license) => ({
+  value: license,
+  label: license
+}))
+
+/** 卡片上展示的 URL 去掉 scheme，省宽度；完整地址放 title。 */
+const shortenUrl = (url: string) => url.replace(/^https?:\/\//i, '')
 
 type Notify = (message: string, tone?: ToastMessage['tone']) => void
 
@@ -69,6 +89,9 @@ export function PoseLibraryCard({
   onCopy?: (item: PoseLibraryItem) => void
 }) {
   const verified = item.license_verified
+  // 预览地址失效时退回「无预览图」占位，避免卡片顶部出现破图。
+  const [brokenPreview, setBrokenPreview] = useState<string | null>(null)
+  const showPreview = Boolean(item.preview_url) && brokenPreview !== item.preview_url
   return (
     <article
       className="flex min-w-0 flex-col overflow-hidden rounded-[14px] border border-black/[0.07] bg-white"
@@ -76,11 +99,12 @@ export function PoseLibraryCard({
       data-pose-id={item.id}
     >
       <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#F2F2F5]">
-        {item.preview_url ? (
+        {showPreview ? (
           <img
-            src={item.preview_url}
+            src={item.preview_url ?? undefined}
             alt={`${item.label_zh} 预览`}
             loading="lazy"
+            onError={() => setBrokenPreview(item.preview_url)}
             className="h-full w-full object-cover"
           />
         ) : (
@@ -106,7 +130,7 @@ export function PoseLibraryCard({
           <h3 className="min-w-0 break-words text-[14px] font-semibold leading-snug text-apple-text">
             {item.label_zh}
           </h3>
-          <span className="num shrink-0 rounded-full bg-black/[0.04] px-2 py-0.5 text-[10.5px] text-apple-subtext">
+          <span className="num max-w-[50%] shrink-0 truncate rounded-full bg-black/[0.04] px-2 py-0.5 text-[10.5px] text-apple-subtext">
             {item.license}
           </span>
         </div>
@@ -125,7 +149,7 @@ export function PoseLibraryCard({
         )}
 
         {item.tags.length > 0 && (
-          <p className="break-words text-[11px] leading-relaxed text-apple-subtext">
+          <p className="min-w-0 break-words text-[11px] leading-relaxed text-apple-subtext">
             #{item.tags.join(' #')}
           </p>
         )}
@@ -135,11 +159,14 @@ export function PoseLibraryCard({
             href={item.source_url}
             target="_blank"
             rel="noreferrer noopener"
-            className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-apple-blueInk underline underline-offset-2"
+            title={item.source_url}
+            className="inline-flex min-w-0 max-w-full items-center gap-1 text-[11px] font-medium text-apple-blueInk underline underline-offset-2"
             data-testid="pose-source-link"
           >
             <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">来源</span>
+            <span className="min-w-0 break-all" data-testid="pose-source-url">
+              {shortenUrl(item.source_url)}
+            </span>
           </a>
           <div className="flex shrink-0 items-center gap-1.5">
             <span className="num hidden text-[10.5px] text-apple-subtext sm:inline">
@@ -186,7 +213,10 @@ export function PoseLibraryGrid({
   onCopy?: (item: PoseLibraryItem) => void
 }) {
   return (
-    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3" data-testid="pose-grid">
+    <div
+      className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3"
+      data-testid="pose-grid"
+    >
       {items.map((item) => (
         <PoseLibraryCard
           key={item.id}
@@ -380,20 +410,17 @@ export function PoseAddDialog({
               License
             </label>
             <div className="mt-1.5">
-              <select
+              <SelectMenu
                 id="pose-add-license"
+                testId="pose-add-license"
                 value={draft.license}
-                onChange={(e) => setField('license', e.target.value as PoseDraft['license'])}
-                className={`${inputClass} pr-8`}
+                options={LICENSE_OPTIONS}
+                onChange={(next) => setField('license', next as PoseDraft['license'])}
+                placeholder="选择协议"
+                ariaLabel="License"
                 disabled={submitting}
-              >
-                <option value="">选择协议</option>
-                {POSE_LICENSES.map((license) => (
-                  <option key={license} value={license}>
-                    {license}
-                  </option>
-                ))}
-              </select>
+                size="md"
+              />
             </div>
             {errors.license && <p className="mt-1 text-[11px] text-[#B42318]">{errors.license}</p>}
           </div>
@@ -684,34 +711,26 @@ export function PoseLibraryPanel({ onNotify }: { onNotify?: Notify }) {
           data-testid="pose-search"
           className={`${inputClass} h-9 min-w-0 flex-1 basis-[180px] sm:max-w-[260px]`}
         />
-        <select
+        <SelectMenu
           value={filters.license}
-          onChange={(event) => setFilters((prev) => ({ ...prev, license: event.target.value as PoseFilters['license'] }))}
-          aria-label="按 license 筛选"
-          data-testid="pose-filter-license"
-          className={`${inputClass} h-9 w-auto shrink-0 pr-7 text-xs`}
-        >
-          <option value="">全部协议</option>
-          {POSE_LICENSES.map((license) => (
-            <option key={license} value={license}>
-              {license}
-            </option>
-          ))}
-        </select>
-        <select
+          options={LICENSE_FILTER_OPTIONS}
+          onChange={(next) =>
+            setFilters((prev) => ({ ...prev, license: next as PoseFilters['license'] }))
+          }
+          ariaLabel="按 license 筛选"
+          testId="pose-filter-license"
+          size="sm"
+          className="min-w-[132px] shrink-0 basis-[132px]"
+        />
+        <SelectMenu
           value={filters.shot}
-          onChange={(event) => setFilters((prev) => ({ ...prev, shot: event.target.value as PoseFilters['shot'] }))}
-          aria-label="按适用镜头筛选"
-          data-testid="pose-filter-shot"
-          className={`${inputClass} h-9 w-auto shrink-0 pr-7 text-xs`}
-        >
-          <option value="">全部镜头</option>
-          {POSE_SHOT_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
+          options={SHOT_FILTER_OPTIONS}
+          onChange={(next) => setFilters((prev) => ({ ...prev, shot: next as PoseFilters['shot'] }))}
+          ariaLabel="按适用镜头筛选"
+          testId="pose-filter-shot"
+          size="sm"
+          className="min-w-[132px] shrink-0 basis-[132px]"
+        />
         {filtered && (
           <button
             type="button"
