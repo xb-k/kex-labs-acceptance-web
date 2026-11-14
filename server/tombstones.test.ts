@@ -23,7 +23,10 @@ const INTAKE = [
   { id: 'j-media', state: 'succeeded', updated_at: '2026-11-01T00:00:00.000Z' },
   { id: 'j-img', state: 'succeeded', updated_at: '2026-11-01T00:00:00.000Z' },
   { id: 'j-keep', state: 'succeeded', updated_at: '2026-11-01T00:00:00.000Z' },
-  { id: 'j-job', state: 'failed', updated_at: '2026-11-01T00:00:00.000Z' }
+  { id: 'j-job', state: 'failed', updated_at: '2026-11-01T00:00:00.000Z' },
+  // Only in the intake (no kex-repo state file) → `/api/jobs/:id` must use the
+  // studio fallback, which is where the #163 live bug leaked.
+  { id: 'j-fallback', state: 'succeeded', updated_at: '2026-11-01T00:00:00.000Z' }
 ]
 
 function write(rel: string, content: string | Buffer): void {
@@ -244,4 +247,17 @@ test('tombstone 一个 b-track job → deliveries 与 snapshot 同时隐藏', as
   assert.equal(deliveries.body.deliveries.some((row: any) => row.jobId === 's1'), false)
   const flow = await request('GET', '/api/flow')
   assert.equal(flow.body.jobs.some((job: any) => job.id === 's1'), false)
+})
+
+test('/api/jobs/:id 的 studio fallback 也遵守 tombstone（#163 线上漏点）', async () => {
+  // j-fallback 只在 intake 里，不在 repo/DB 列表 → 走 studioFallbackDetail。
+  assert.equal((await request('GET', '/api/jobs/j-fallback')).status, 200)
+
+  tombstone('j-fallback', 'job', [], { dataRoot: root })
+
+  const gone = await request('GET', '/api/jobs/j-fallback')
+  assert.equal(gone.status, 404)
+  assert.equal(gone.body.error, 'job not found')
+  // 非 tombstone 的 job 照旧 200。
+  assert.equal((await request('GET', '/api/jobs/j-keep')).status, 200)
 })

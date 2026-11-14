@@ -5193,6 +5193,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse, next: C
 
   const jobItemMatch = pathname.match(/^\/api\/jobs\/([\w-]+)$/)
   if (jobItemMatch) {
+    // #163: a tombstoned job resolves to 404 even if a source still lists it.
+    if (isTombstoned(jobItemMatch[1], { dataRoot: DATA_ROOT })) {
+      sendJson(res, 404, { error: 'job not found' })
+      return
+    }
     const { source, items } = await loadSourceJobs()
     const job = items.find((j) => j.id === jobItemMatch[1])
     if (job) {
